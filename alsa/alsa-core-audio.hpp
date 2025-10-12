@@ -23,11 +23,15 @@ public:
 	
 	virtual std::expected<void, std::string> 
 	setSamplerate(const unsigned int samplerate) override;
+
+	void audioLoop() override;
 private:
 	snd_pcm_t *m_playbackHandle = nullptr;
 	snd_pcm_t *m_captureHandle = nullptr;
 	snd_pcm_hw_params_t *m_parameter = nullptr;
+	snd_pcm_hw_params_t *m_parameterCapture = nullptr;
 
 	std::expected<void, std::string> update_alsa_parameter();
+
 };
 #endif //ALSA_CORE_AUDIO_HPP
