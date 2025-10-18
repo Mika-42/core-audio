@@ -24,7 +24,7 @@ public:
 	virtual std::expected<void, std::string> 
 	setSamplerate(const unsigned int samplerate) override;
 
-	void audioLoop() override;
+	std::expected<void, std::string> audioLoop() override;
 private:
 	snd_pcm_t *m_playbackHandle = nullptr;
 	snd_pcm_t *m_captureHandle = nullptr;

@@ -49,7 +49,7 @@ public:
 	
 	virtual const unsigned int& getSamplerate() const final { return m_samplerate; }
 
-	virtual void audioLoop() = 0;
+	virtual std::expected<void, std::string> audioLoop() = 0;
 	
 	virtual ~AbstractCoreAudio(){}
 
