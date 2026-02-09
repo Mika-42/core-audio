@@ -1,3 +1,7 @@
 # directories
 
 /build/
+/gcm.cache/
+/obj/
+app
+autoprompt.sh
