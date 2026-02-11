@@ -21,10 +21,39 @@ export import audio.config;
 import audio.error;
 import audio.abstract_core;
 
+int setupPCM(snd_pcm_t ** handle, const char* device, snd_pcm_stream_t stream, unsigned int samplerate, snd_pcm_uframes_t frames, unsigned int channels) {
+	int err = 0;
+
+	if(err = snd_pcm_open(handle, device, stream, SND_PCM_NONBLOCK); err < 0) {
+		return err;
+	}
+
+	snd_pcm_hw_params_t* hw = nullptr;
+    snd_pcm_hw_params_alloca(&hw);
+    snd_pcm_hw_params_any(*handle, hw);
+
+    snd_pcm_hw_params_set_access(*handle, hw, SND_PCM_ACCESS_RW_NONINTERLEAVED);
+    snd_pcm_hw_params_set_format(*handle, hw, SND_PCM_FORMAT_FLOAT_LE);
+    snd_pcm_hw_params_set_channels(*handle, hw, channels);
+    snd_pcm_hw_params_set_rate_near(*handle, hw, &samplerate, nullptr);
+    snd_pcm_hw_params_set_period_size_near(*handle, hw, &frames, nullptr);
+    snd_pcm_hw_params_set_buffer_size(*handle, hw, frames * 2);
+
+	if(err = snd_pcm_hw_params(*handle, hw); err < 0) {
+		return err;
+	}
+	
+	snd_pcm_hw_params_free(hw);
+
+    snd_pcm_prepare(*handle);
+
+    return 0;
+}
+
 export namespace mka::audio {
 
 	class ALSA final: public AbstractCoreAudio {
-
+	
 	public:
 		ALSA() = default;
 		
