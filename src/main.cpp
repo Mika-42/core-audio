@@ -5,13 +5,14 @@
 import audio.alsa;
 
 void audio_callback(const mka::audio::Block& block) {
-	static unsigned long long int i = 0;
+	static float phase = 0.0f;
 
-	for(uint32_t f = 0; f < block.frames; ++f) {	
-		for(uint32_t ch = 0; ch < block.channels; ++ch) {
-			block.out[ch][f] = 0.5 * std::sin(2.0f * 3.1415926535f * 440.0f * (float)i / (float)block.samplerate); 
+	for(uint32_t i = 0; i < block.frames; ++i) {
+		float sample = sinf(phase);
+		phase += 2.0f * M_PI * 440.0f / block.samplerate;
+		for(uint32_t ch = 0; ch < block.outChannels; ++ch) {
+			block.out[ch][i] = sample;
 		}
-		++i;
 	}
 }
 
@@ -23,7 +24,8 @@ int main()
 	mka::audio::Config config {
 		.samplerate = 44100,
 		.bufferSize = 512,
-		.channels = 2,
+		.outChannels = 2,
+		.inChannels = 1,
 		.name = "default"
 	};
 

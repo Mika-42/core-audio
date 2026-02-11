@@ -43,6 +43,10 @@ $(APP): $(MODULE_OBJS) $(MAIN_SRC)
 
 #=============================================================================#
 # Utilities
+
+$(BUILD_DIR):
+	mkdir -p $@
+
 clean:
 	rm -rf $(OBJ_DIR) $(APP)
 
