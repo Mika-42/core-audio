@@ -69,7 +69,7 @@ export namespace mka::audio {
 				ALSA_CHECK(err,	Error::DeviceOpenFailed);
 			
 				// setup output hardware
-				snd_pcm_hw_params_alloca(&playbackParameter);
+				snd_pcm_hw_params_malloc(&playbackParameter);
 				snd_pcm_hw_params_any(playback, playbackParameter);
 
 				Result ret = setupHardwareParameter(playback, playbackParameter, config.outChannels);
@@ -79,6 +79,11 @@ export namespace mka::audio {
 
 				err = snd_pcm_hw_params(playback, playbackParameter);
 				ALSA_CHECK(err,	Error::HardwareSetupFailed);
+
+				Result swRet = setupSoftwareParameter(playback);
+				if(!swRet.ok()) {
+					return swRet;
+				}
 				
 				// poll descriptors count
 				outCount = snd_pcm_poll_descriptors_count(playback);
@@ -99,6 +104,11 @@ export namespace mka::audio {
 				}
 				err = snd_pcm_hw_params(capture, captureParameter);
 				ALSA_CHECK(err,	Error::HardwareSetupFailed);
+
+				Result swRet = setupSoftwareParameter(capture);
+				if(!swRet.ok()) {
+					return swRet;
+				}
 				
 				// poll descriptors count
 				inCount = snd_pcm_poll_descriptors_count(capture);
@@ -161,7 +171,6 @@ export namespace mka::audio {
 
 			if(hasPlayback) {
 		        snd_pcm_prepare(playback);
-		        snd_pcm_start(playback);
 		    }
 
 		    if(hasCapture) {
@@ -209,8 +218,8 @@ export namespace mka::audio {
 				
 				snd_pcm_uframes_t frames = config.bufferSize;
 
-				if(hasPlayback) frames = std::min(frames, framesPlayback);
-				if(hasCapture)  frames = std::min(frames, framesCapture);
+				if(readyPlayback) frames = std::min(frames, framesPlayback);
+				if(readyCapture)  frames = std::min(frames, framesCapture);
 
 				if(frames == 0) continue;
 
@@ -250,6 +259,26 @@ export namespace mka::audio {
 		}
 
 	private:
+		Result setupSoftwareParameter(snd_pcm_t* pcm) {
+
+			snd_pcm_sw_params_t* sw = nullptr;
+			snd_pcm_sw_params_alloca(&sw);
+
+			int err = snd_pcm_sw_params_current(pcm, sw);
+			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
+
+			err = snd_pcm_sw_params_set_start_threshold(pcm, sw, config.bufferSize);
+			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
+
+			err = snd_pcm_sw_params_set_avail_min(pcm, sw, config.bufferSize);
+			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
+
+			err = snd_pcm_sw_params(pcm, sw);
+			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
+
+			return mka::audio::Ok;
+		}
+
 		Result setupHardwareParameter(snd_pcm_t* pcm, snd_pcm_hw_params_t* hw, uint32_t channels) {
 		
 			unsigned int		rate		= config.samplerate;
