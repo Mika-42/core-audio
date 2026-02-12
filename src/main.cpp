@@ -25,13 +25,15 @@ int main()
 		.samplerate = 44100,
 		.bufferSize = 512,
 		.outChannels = 2,
-		.inChannels = 1,
+		.inChannels = 0,
 		.name = "default"
 	};
 
 	auto ret = alsa.open(config);
-	if(!ret.ok()) std::println("error::{}", ret.message);
-
+	if(!ret.ok()) {
+		std::println("error::{}", ret.message);
+		return 1;
+	}
 	alsa.setCallback(audio_callback);
 	alsa.start();
 	
