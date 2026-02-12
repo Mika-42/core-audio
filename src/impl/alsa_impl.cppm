@@ -22,34 +22,6 @@ export import audio.config;
 import audio.error;
 import audio.abstract_core;
 
-int setupPCM(snd_pcm_t ** handle, const char* device, snd_pcm_stream_t stream, unsigned int samplerate, snd_pcm_uframes_t frames, unsigned int channels) {
-	int err = 0;
-
-	if(err = snd_pcm_open(handle, device, stream, SND_PCM_NONBLOCK); err < 0) {
-		return err;
-	}
-
-	snd_pcm_hw_params_t* hw = nullptr;
-    snd_pcm_hw_params_alloca(&hw);
-    snd_pcm_hw_params_any(*handle, hw);
-
-    snd_pcm_hw_params_set_access(*handle, hw, SND_PCM_ACCESS_RW_NONINTERLEAVED);
-    snd_pcm_hw_params_set_format(*handle, hw, SND_PCM_FORMAT_FLOAT_LE);
-    snd_pcm_hw_params_set_channels(*handle, hw, channels);
-    snd_pcm_hw_params_set_rate_near(*handle, hw, &samplerate, nullptr);
-    snd_pcm_hw_params_set_period_size_near(*handle, hw, &frames, nullptr);
-    snd_pcm_hw_params_set_buffer_size(*handle, hw, frames * 2);
-
-	if(err = snd_pcm_hw_params(*handle, hw); err < 0) {
-		return err;
-	}
-	
-	snd_pcm_hw_params_free(hw);
-
-    snd_pcm_prepare(*handle);
-
-    return 0;
-}
 
 export namespace mka::audio {
 
@@ -66,7 +38,7 @@ export namespace mka::audio {
 			if(config.outChannels > 0) {
 				
 				// open the output device
-				int err = snd_pcm_open(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+				int err = snd_pcm_open(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
 				ALSA_CHECK(err,	Error::DeviceOpenFailed);
 			
 				// setup output hardware
@@ -82,10 +54,11 @@ export namespace mka::audio {
 				ALSA_CHECK(err,	Error::HardwareSetupFailed);
 
 				Result swRet = setupSoftwareParameter(playback);
+        
 				if(!swRet.ok()) {
 					return swRet;
 				}
-				
+
 				// poll descriptors count
 				outCount = snd_pcm_poll_descriptors_count(playback);
 				if(outCount < 0) {
@@ -111,10 +84,11 @@ export namespace mka::audio {
 				ALSA_CHECK(err,	Error::HardwareSetupFailed);
 
 				Result swRet = setupSoftwareParameter(capture);
+				
 				if(!swRet.ok()) {
 					return swRet;
 				}
-				
+
 				// poll descriptors count
 				inCount = snd_pcm_poll_descriptors_count(capture);
 				if(inCount < 0) {
@@ -189,7 +163,7 @@ export namespace mka::audio {
 
 			while(running.load(std::memory_order_acquire)) {
 
-				if(poll(pfds.data(), pfds.size(), 50) <= 0) {
+				if(poll(pfds.data(), pfds.size(), -1) <= 0) {
 					continue;
 				}
 
@@ -333,7 +307,7 @@ export namespace mka::audio {
 
 			err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &periodSize, nullptr);	
 			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-			
+				
 			return mka::audio::Ok;
 		}
 
