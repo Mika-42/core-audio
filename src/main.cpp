@@ -24,7 +24,7 @@ int main()
 	mka::audio::Config config {
 		.samplerate = 44100,
 		.bufferSize = 512,
-		.outChannels = 2,
+		.outChannels = 1,
 		.inChannels = 0,
 		.name = "default"
 	};

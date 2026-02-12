@@ -3,5 +3,6 @@
 /build/
 /gcm.cache/
 /obj/
+/pytools/.venv
 app
 autoprompt.sh
