@@ -54,11 +54,10 @@ export namespace mka::audio {
 				ALSA_CHECK(err,	Error::HardwareSetupFailed);
 
 				Result swRet = setupSoftwareParameter(playback);
-        
 				if(!swRet.ok()) {
 					return swRet;
 				}
-
+				
 				// poll descriptors count
 				outCount = snd_pcm_poll_descriptors_count(playback);
 				if(outCount < 0) {
@@ -69,7 +68,7 @@ export namespace mka::audio {
 
 			if(config.inChannels > 0) {
 				// open the input device
-				int err = snd_pcm_open(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, 0);
+				int err = snd_pcm_open(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
 				ALSA_CHECK(err,	Error::DeviceOpenFailed);
 				
 				// setup input hardware
@@ -84,7 +83,7 @@ export namespace mka::audio {
 				ALSA_CHECK(err,	Error::HardwareSetupFailed);
 
 				Result swRet = setupSoftwareParameter(capture);
-				
+        
 				if(!swRet.ok()) {
 					return swRet;
 				}
@@ -151,9 +150,11 @@ export namespace mka::audio {
 
 			const bool hasPlayback = config.outChannels > 0;
 			const bool hasCapture  = config.inChannels  > 0;
+			bool playbackStarted = false;
 
 			if(hasPlayback) {
 		        ALSA_LOG_ERROR(snd_pcm_prepare(playback));
+		        playbackStarted = false;
 		    }
 
 		    if(hasCapture) {
@@ -192,7 +193,7 @@ export namespace mka::audio {
 				snd_pcm_uframes_t framesPlayback = 0;
 				snd_pcm_uframes_t framesCapture  = 0;
 
-				bool readyPlayback = hasPlayback && (revOut & POLLOUT) && beginPlayback(framesPlayback);
+				bool readyPlayback = hasPlayback && beginPlayback(framesPlayback);
 				bool readyCapture  = hasCapture  && (revIn  & POLLIN) && beginCapture(framesCapture);
 
 				if(!readyPlayback && !readyCapture) {
@@ -228,6 +229,7 @@ export namespace mka::audio {
 					if(committed < 0) {
 						logAlsaError("snd_pcm_mmap_commit(playback)", static_cast<int>(committed));
 						ALSA_LOG_ERROR(snd_pcm_recover(playback, static_cast<int>(committed), 1));
+						playbackStarted = false;
 						continue;
 					}
 
@@ -235,6 +237,21 @@ export namespace mka::audio {
 						std::fprintf(stderr, "[ALSA] short playback commit: requested=%lu committed=%ld\n",
 							static_cast<unsigned long>(frames),
 							static_cast<long>(committed));
+					}
+
+					if(!playbackStarted) {
+						snd_pcm_state_t state = snd_pcm_state(playback);
+						if(state == SND_PCM_STATE_PREPARED) {
+							int startErr = snd_pcm_start(playback);
+							if(startErr < 0) {
+								logAlsaError("snd_pcm_start(playback)", startErr);
+								ALSA_LOG_ERROR(snd_pcm_recover(playback, startErr, 1));
+							} else {
+								playbackStarted = true;
+							}
+						} else if(state == SND_PCM_STATE_RUNNING) {
+							playbackStarted = true;
+						}
 					}
 				}
 
@@ -329,6 +346,10 @@ export namespace mka::audio {
 					static_cast<snd_pcm_uframes_t>(config.bufferSize)
 			);
 
+			if(frames == 0) {
+				return false;
+			}
+
 			int err = snd_pcm_mmap_begin(playback, &outAreas, &playbackOffset, &frames);
 		   
 			if(err < 0) {
@@ -365,6 +386,10 @@ export namespace mka::audio {
 					static_cast<snd_pcm_uframes_t>(avail), 
 					static_cast<snd_pcm_uframes_t>(config.bufferSize)
 			);
+
+			if(frames == 0) {
+				return false;
+			}
 
 			int err = snd_pcm_mmap_begin(capture, &inAreas, &captureOffset, &frames);
 		   
