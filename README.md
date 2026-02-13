@@ -33,11 +33,12 @@ Thanks to this structure you can operate over the buffer and access to related d
 ### 3. configuration
 
 ```cpp
-	config.samplerate;
-	config.bufferSize;
-	config.outChannels;
-	config.inChannels;
-	config.name;
+config.samplerate;
+config.bufferSize;
+config.outChannels;
+config.inChannels;
+config.audioFormat;
+config.name;
 ```
 
 This struct describe how you audio channel should be.
@@ -80,6 +81,7 @@ int main()
 		.buffersize = 512,
 		.outChannels = 2,       // stereo output
 		.inChannels = 1,        // mono input
+        .audioFormat = mka::audio::Format::Float32,
 		.name = "default"
 	};
 

@@ -5,6 +5,9 @@ module;
 #include <thread>
 #include <atomic>
 
+#include <pthread.h>
+#include <sched.h>
+
 export module audio.abstract_core;
 import audio.error;
 import audio.block;
@@ -28,6 +31,17 @@ export namespace mka::audio {
 		virtual void start() {
 			if(running.exchange(true)) return;
 			audioThread = std::thread(&AbstractCoreAudio::run, this);
+
+			// thread priority
+			sched_param param = {};
+			param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 5;
+			pthread_setschedparam(audioThread.native_handle(), SCHED_FIFO, &param);
+
+			cpu_set_t cpuset;
+			CPU_ZERO(&cpuset);
+			CPU_SET(0, &cpuset);
+			pthread_setaffinity_np(audioThread.native_handle(), sizeof(cpu_set_t), &cpuset);
+
 		}
 
 		virtual void stop() {

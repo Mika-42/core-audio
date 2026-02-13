@@ -7,6 +7,8 @@ module;
 #include <cstdio>
 #include <alsa/asoundlib.h>
 
+#include <sys/mman.h>
+
 inline void logAlsaError(const char* what, int code) {
 	std::fprintf(stderr, "[ALSA] %s failed: %s (%d)\n", what, snd_strerror(code), code);
 }
@@ -34,6 +36,17 @@ import audio.error;
 import audio.abstract_core;
 
 //---- alsa wrapper ----//
+snd_pcm_format_t select_format(mka::audio::Format fmt) {
+    switch(fmt) {
+        case mka::audio::Format::Int16:   return SND_PCM_FORMAT_S16_LE;
+        case mka::audio::Format::Int24:   return SND_PCM_FORMAT_S24_LE;
+        case mka::audio::Format::Int32:   return SND_PCM_FORMAT_S32_LE;
+        case mka::audio::Format::Float32: return SND_PCM_FORMAT_FLOAT_LE;
+        case mka::audio::Format::Float64: return SND_PCM_FORMAT_FLOAT64_LE;
+    }
+    return SND_PCM_FORMAT_FLOAT_LE;
+}
+
 mka::audio::Result setup_pcm(
 		snd_pcm_t**			handle, 
 		const char*			device_name, 
@@ -41,7 +54,8 @@ mka::audio::Result setup_pcm(
 		uint32_t			channels,
 		int&				descriptor_count,
 		uint32_t&			samplerate,
-		uint32_t			buffer_size) {
+		uint32_t			buffer_size,
+		mka::audio::Format	fmt) {
 
 	// open the output device
 	ALSA_CHECK(snd_pcm_open(handle, device_name, stream_mode, SND_PCM_NONBLOCK), mka::audio::Error::DeviceOpenFailed);
@@ -52,14 +66,15 @@ mka::audio::Result setup_pcm(
 	ALSA_CHECK(snd_pcm_hw_params_any(*handle, hw), mka::audio::Error::HardwareSetupFailed);
 	snd_pcm_uframes_t	bufferSize	= buffer_size * 2;
 	snd_pcm_uframes_t	periodSize	= buffer_size;	
+	snd_pcm_format_t	desired_format = select_format(fmt);
 	snd_pcm_format_t	real_format = {};
 
 	ALSA_CHECK(snd_pcm_hw_params_set_access(*handle, hw, SND_PCM_ACCESS_MMAP_NONINTERLEAVED), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_format(*handle, hw, SND_PCM_FORMAT_FLOAT_LE), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_hw_params_set_format(*handle, hw, desired_format), mka::audio::Error::SetupHardwareParameterFailed);
 	ALSA_CHECK(snd_pcm_hw_params_get_format(hw, &real_format), mka::audio::Error::SetupHardwareParameterFailed);
 
-	if(real_format != SND_PCM_FORMAT_FLOAT_LE) {
-		return mka::audio::Result { mka::audio::Error::SetupHardwareParameterFailed, "Device does not support float" };
+	if(real_format != desired_format) {
+		return mka::audio::Result { mka::audio::Error::SetupHardwareParameterFailed, "Audio format is not supported" };
 	}
 
 	ALSA_CHECK(snd_pcm_hw_params_set_channels(*handle, hw, channels), mka::audio::Error::SetupHardwareParameterFailed);
@@ -148,7 +163,7 @@ export namespace mka::audio {
 			
 			if(config.outChannels > 0) {
 
-				Result ret = setup_pcm(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, config.outChannels, outCount, config.samplerate, config.bufferSize);
+				Result ret = setup_pcm(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, config.outChannels, outCount, config.samplerate, config.bufferSize, config.audioFormat);
 				
 				if(!ret.ok()) {
 					return ret;
@@ -156,7 +171,7 @@ export namespace mka::audio {
 			}
 
 			if(config.inChannels > 0) {
-				Result ret = setup_pcm(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, config.inChannels, inCount, config.samplerate, config.bufferSize);
+				Result ret = setup_pcm(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, config.inChannels, inCount, config.samplerate, config.bufferSize, config.audioFormat);
 
 				if(!ret.ok()) {
 					return ret;
@@ -182,10 +197,15 @@ export namespace mka::audio {
 			outPtrs.resize(config.outChannels, nullptr);
 			inPtrs.resize(config.inChannels, nullptr);
 			
+			mlockall(MCL_CURRENT | MCL_FUTURE);			
+			
 			return mka::audio::Ok;
 		}
 		
 		Result close() override {
+			
+			munlockall();
+
 			if(playback) {
 				ALSA_LOG_ERROR(snd_pcm_drain(playback));
 				ALSA_LOG_ERROR(snd_pcm_close(playback));
