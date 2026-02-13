@@ -34,8 +34,9 @@ Thanks to this structure you can operate over the buffer and access to related d
 
 ```cpp
 	config.samplerate;
-	config.buffersize;
-	config.channels;
+	config.bufferSize;
+	config.outChannels;
+	config.inChannels;
 	config.name;
 ```
 
@@ -77,12 +78,16 @@ int main()
 	mka::audio::config config {
 		.samplerate = 44100,
 		.buffersize = 512,
-		.channels = 2,
+		.outChannels = 2,       // stereo output
+		.inChannels = 1,        // mono input
 		.name = "default"
 	};
 
 	auto ret = alsa.open(config);
-	if(!reti.ok()) std::println("error::{}", ret.message);
+	if(!ret.ok()) {
+        std::println("error::{}", ret.message);
+        return -1;
+    }
 
 	alsa.setCallback(audio_callback);
 	alsa.start();
@@ -93,7 +98,10 @@ int main()
 	alsa.stop();
 
 	ret = alsa.close();
-	if(!ret.ok()) std::println("error::{}", ret.message);
+	if(!ret.ok()) {
+        std::println("error::{}", ret.message);
+        return -1;
+    }
 
 	return 0;
 }
