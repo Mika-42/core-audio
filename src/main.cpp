@@ -21,7 +21,7 @@ void audio_callback(const mka::audio::Block& block) {
 int main() 
 {
 
-	mka::audio::ALSA alsa;
+	mka::audio::ALSA engine;
 	
 	mka::audio::Config config {
 		.samplerate = 44100,
@@ -32,20 +32,20 @@ int main()
 		.name = "default"
 	};
 
-	auto ret = alsa.open(config);
+	auto ret = engine.open(config);
 	if(!ret.ok()) {
 		std::println("error::{}", ret.message);
 		return 1;
 	}
-	alsa.setCallback(audio_callback);
-	alsa.start();
+	engine.setCallback(audio_callback);
+	engine.start();
 	
 	std::println("Press Enter to stop audio...\n");
 	std::cin.get();
 	
-	alsa.stop();
+	engine.stop();
 
-	ret = alsa.close();
+	ret = engine.close();
 	if(!ret.ok()) std::println("error::{}", ret.message);
 
 	return 0;

@@ -121,10 +121,7 @@ bool begin(
 		return false;
 	}
 
-	frames = std::min(
-			static_cast<snd_pcm_uframes_t>(avail),
-			buffer_size
-	);
+	frames = std::min(static_cast<snd_pcm_uframes_t>(avail), buffer_size);
 
 	if(frames == 0) {
 		return false;
@@ -163,7 +160,16 @@ export namespace mka::audio {
 			
 			if(config.outChannels > 0) {
 
-				Result ret = setup_pcm(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, config.outChannels, outCount, config.samplerate, config.bufferSize, config.audioFormat);
+				Result ret = setup_pcm(
+						&playback, 
+						config.name.c_str(),
+						SND_PCM_STREAM_PLAYBACK,
+						config.outChannels,
+						outCount,
+						config.samplerate,
+						config.bufferSize, 
+						config.audioFormat
+				);
 				
 				if(!ret.ok()) {
 					return ret;
@@ -171,18 +177,29 @@ export namespace mka::audio {
 			}
 
 			if(config.inChannels > 0) {
-				Result ret = setup_pcm(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, config.inChannels, inCount, config.samplerate, config.bufferSize, config.audioFormat);
+				Result ret = setup_pcm(
+						&capture,
+						config.name.c_str(), 
+						SND_PCM_STREAM_CAPTURE, 
+						config.inChannels, 
+						inCount, 
+						config.samplerate, 
+						config.bufferSize, 
+						config.audioFormat
+				);
 
 				if(!ret.ok()) {
 					return ret;
 				}
 			}
 
-			if(outCount + inCount <= 0) {
+			const size_t totalCount = outCount + inCount;
+
+			if(totalCount <= 0) {
 				return Result{Error::PollSetupFailed, "Invalid poll descriptor count"};
 			}
 
-			pfds.resize(static_cast<size_t>(outCount + inCount));
+			pfds.resize(totalCount);
 			
 			if(config.outChannels > 0) {
 				// poll descriptors out
@@ -227,6 +244,13 @@ export namespace mka::audio {
 			const bool hasPlayback = config.outChannels > 0;
 			const bool hasCapture  = config.inChannels  > 0;
 			bool playbackStarted = false;
+	
+			const snd_pcm_channel_area_t* outAreas = nullptr;
+			const snd_pcm_channel_area_t* inAreas  = nullptr;
+			snd_pcm_uframes_t framesPlayback = 0;
+			snd_pcm_uframes_t framesCapture  = 0;
+			snd_pcm_uframes_t playbackOffset = 0;
+			snd_pcm_uframes_t captureOffset  = 0;
 
 			if(hasPlayback) {
 		        ALSA_LOG_ERROR(snd_pcm_prepare(playback));
@@ -266,8 +290,6 @@ export namespace mka::audio {
 					continue;
 				}
 
-				snd_pcm_uframes_t framesPlayback = 0;
-				snd_pcm_uframes_t framesCapture  = 0;
 
 				bool readyPlayback = hasPlayback && begin(playback, &outAreas, config.bufferSize, config.outChannels, playbackOffset, framesPlayback, outPtrs);
 				bool readyCapture  = hasCapture  && (revIn  & POLLIN) && begin(capture, &inAreas, config.bufferSize, config.inChannels, captureOffset, framesCapture, inPtrs);
@@ -352,21 +374,14 @@ export namespace mka::audio {
 
 	private:
 
-		snd_pcm_t*				playback			 = nullptr;
-		snd_pcm_t*				capture				 = nullptr;
-		std::vector<pollfd>		pfds;
-		std::vector<float*>		outPtrs;
-		std::vector<float*>		inPtrs;
+		snd_pcm_t*			playback = nullptr;
+		snd_pcm_t*			capture	 = nullptr;
 
-		int outCount = 0;
-		int inCount = 0;	
+		std::vector<pollfd>	pfds;
+		std::vector<float*>	outPtrs;
+		std::vector<float*>	inPtrs;
 
-		const snd_pcm_channel_area_t* outAreas = nullptr;
-		const snd_pcm_channel_area_t* inAreas  = nullptr;
-
-		snd_pcm_uframes_t playbackOffset = 0;
-		snd_pcm_uframes_t captureOffset  = 0;
-//		snd_pcm_uframes_t playbackFrames = 0;
-//		snd_pcm_uframes_t captureFrames  = 0;
+		int					outCount = 0;
+		int					inCount	 = 0;	
 	};
 }

@@ -22,6 +22,7 @@ export namespace mka::audio {
 
 		Result open(const Config& config) override {}
 		Result close() override {}
-}
 
+	};
+}
 
