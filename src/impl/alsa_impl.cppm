@@ -7,13 +7,24 @@ module;
 #include <cstdio>
 #include <alsa/asoundlib.h>
 
-static inline void logAlsaError(const char* what, int code) {
+inline void logAlsaError(const char* what, int code) {
 	std::fprintf(stderr, "[ALSA] %s failed: %s (%d)\n", what, snd_strerror(code), code);
 }
 
-#define ALSA_CHECK(_call_or_value, _error_code)	do {		int _alsa_retcode = (_call_or_value);		if(_alsa_retcode < 0) {			logAlsaError(#_call_or_value, _alsa_retcode);			return Result { _error_code, snd_strerror(_alsa_retcode) };		}	} while(0);
+#define ALSA_CHECK(_call_or_value, _error_code)	do {							\
+	int _alsa_retcode = (_call_or_value);										\
+	if(_alsa_retcode < 0) {														\
+		logAlsaError(#_call_or_value, _alsa_retcode);							\
+		return mka::audio::Result { _error_code, snd_strerror(_alsa_retcode) };	\
+	}																			\
+} while(0);
 
-#define ALSA_LOG_ERROR(_call_or_value)	do {		int _alsa_retcode = (_call_or_value);		if(_alsa_retcode < 0) {			logAlsaError(#_call_or_value, _alsa_retcode);		}	} while(0);
+#define ALSA_LOG_ERROR(_call_or_value)	do {						\
+	int _alsa_retcode = (_call_or_value);							\
+	if(_alsa_retcode < 0) {											\
+		logAlsaError(#_call_or_value, _alsa_retcode);				\
+	}																\
+} while(0);
 
 export module audio.alsa;
 export import audio.block;
@@ -22,7 +33,107 @@ export import audio.config;
 import audio.error;
 import audio.abstract_core;
 
+//---- alsa wrapper ----//
+mka::audio::Result setup_pcm(
+		snd_pcm_t**			handle, 
+		const char*			device_name, 
+		snd_pcm_stream_t	stream_mode, 
+		uint32_t			channels,
+		int&				descriptor_count,
+		uint32_t&			samplerate,
+		uint32_t			buffer_size) {
 
+	// open the output device
+	ALSA_CHECK(snd_pcm_open(handle, device_name, stream_mode, SND_PCM_NONBLOCK), mka::audio::Error::DeviceOpenFailed);
+				
+	// setup output hardware
+	snd_pcm_hw_params_t* hw = nullptr;
+	snd_pcm_hw_params_alloca(&hw);
+	ALSA_CHECK(snd_pcm_hw_params_any(*handle, hw), mka::audio::Error::HardwareSetupFailed);
+	snd_pcm_uframes_t	bufferSize	= buffer_size * 2;
+	snd_pcm_uframes_t	periodSize	= buffer_size;	
+	snd_pcm_format_t	real_format = {};
+
+	ALSA_CHECK(snd_pcm_hw_params_set_access(*handle, hw, SND_PCM_ACCESS_MMAP_NONINTERLEAVED), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_hw_params_set_format(*handle, hw, SND_PCM_FORMAT_FLOAT_LE), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_hw_params_get_format(hw, &real_format), mka::audio::Error::SetupHardwareParameterFailed);
+
+	if(real_format != SND_PCM_FORMAT_FLOAT_LE) {
+		return mka::audio::Result { mka::audio::Error::SetupHardwareParameterFailed, "Device does not support float" };
+	}
+
+	ALSA_CHECK(snd_pcm_hw_params_set_channels(*handle, hw, channels), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_hw_params_set_rate_near(*handle, hw, &samplerate, nullptr), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_hw_params_set_buffer_size_near(*handle, hw, &bufferSize), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_hw_params_set_period_size_near(*handle, hw, &periodSize, nullptr), mka::audio::Error::SetupHardwareParameterFailed);	
+	ALSA_CHECK(snd_pcm_hw_params(*handle, hw), mka::audio::Error::HardwareSetupFailed);
+	// setup output software	
+	snd_pcm_sw_params_t* sw = nullptr;
+	snd_pcm_sw_params_alloca(&sw);
+
+	ALSA_CHECK(snd_pcm_sw_params_current(*handle, sw), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_sw_params_set_start_threshold(*handle, sw, buffer_size), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_sw_params_set_avail_min(*handle, sw, buffer_size), mka::audio::Error::SetupHardwareParameterFailed);
+	ALSA_CHECK(snd_pcm_sw_params(*handle, sw), mka::audio::Error::SetupHardwareParameterFailed);
+	
+	// poll descriptors count
+	descriptor_count = snd_pcm_poll_descriptors_count(*handle);
+
+	if(descriptor_count < 0) {
+		logAlsaError("snd_pcm_poll_descriptors_count", descriptor_count);
+		return mka::audio::Result {mka::audio::Error::PollSetupFailed, snd_strerror(descriptor_count)};
+	}
+
+	return mka::audio::Ok;
+}
+
+bool begin(
+		snd_pcm_t* handle,
+		const snd_pcm_channel_area_t **areas,
+		snd_pcm_uframes_t buffer_size,
+		uint32_t channels,
+		snd_pcm_uframes_t& offset,
+		snd_pcm_uframes_t& frames, std::span<float*> ptrs) {
+
+	if(channels == 0) {
+		return false;
+	}
+
+	snd_pcm_sframes_t avail = snd_pcm_avail_update(handle);
+
+	if(avail < 0) {
+		ALSA_LOG_ERROR(snd_pcm_recover(handle, avail, 1));
+		return false;
+	}
+
+	frames = std::min(
+			static_cast<snd_pcm_uframes_t>(avail),
+			buffer_size
+	);
+
+	if(frames == 0) {
+		return false;
+	}
+
+	int err = snd_pcm_mmap_begin(handle, areas, &offset, &frames);
+
+	if(err < 0) {
+		ALSA_LOG_ERROR(snd_pcm_recover(handle, err, 1));
+		return false;
+	}
+
+	for(uint32_t channel = 0; channel < channels; ++channel) {
+		ptrs[channel] = reinterpret_cast<float*>(
+			static_cast<char*>(areas[channel]->addr)
+			+ (areas[channel]->first / 8)
+			+ offset * (areas[channel]->step / 8)
+		);
+	}
+
+	return true;
+}
+
+//---------------------//
 export namespace mka::audio {
 
 	class ALSA final: public AbstractCoreAudio {
@@ -36,63 +147,19 @@ export namespace mka::audio {
 			// poll descriptors count
 			
 			if(config.outChannels > 0) {
-				
-				// open the output device
-				int err = snd_pcm_open(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
-				ALSA_CHECK(err,	Error::DeviceOpenFailed);
-			
-				// setup output hardware
-				ALSA_CHECK(snd_pcm_hw_params_malloc(&playbackParameter), Error::HardwareSetupFailed);
-				ALSA_CHECK(snd_pcm_hw_params_any(playback, playbackParameter), Error::HardwareSetupFailed);
 
-				Result ret = setupHardwareParameter(playback, playbackParameter, config.outChannels);
+				Result ret = setup_pcm(&playback, config.name.c_str(), SND_PCM_STREAM_PLAYBACK, config.outChannels, outCount, config.samplerate, config.bufferSize);
+				
 				if(!ret.ok()) {
 					return ret;
-				}
-
-				err = snd_pcm_hw_params(playback, playbackParameter);
-				ALSA_CHECK(err,	Error::HardwareSetupFailed);
-
-				Result swRet = setupSoftwareParameter(playback);
-				if(!swRet.ok()) {
-					return swRet;
-				}
-				
-				// poll descriptors count
-				outCount = snd_pcm_poll_descriptors_count(playback);
-				if(outCount < 0) {
-					logAlsaError("snd_pcm_poll_descriptors_count(playback)", static_cast<int>(outCount));
-					return Result{Error::PollSetupFailed, snd_strerror(static_cast<int>(outCount))};
 				}
 			}
 
 			if(config.inChannels > 0) {
-				// open the input device
-				int err = snd_pcm_open(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
-				ALSA_CHECK(err,	Error::DeviceOpenFailed);
-				
-				// setup input hardware
-				ALSA_CHECK(snd_pcm_hw_params_malloc(&captureParameter), Error::HardwareSetupFailed);
-				ALSA_CHECK(snd_pcm_hw_params_any(capture, captureParameter), Error::HardwareSetupFailed);
+				Result ret = setup_pcm(&capture, config.name.c_str(), SND_PCM_STREAM_CAPTURE, config.inChannels, inCount, config.samplerate, config.bufferSize);
 
-				Result ret = setupHardwareParameter(capture, captureParameter, config.inChannels);
 				if(!ret.ok()) {
 					return ret;
-				}
-				err = snd_pcm_hw_params(capture, captureParameter);
-				ALSA_CHECK(err,	Error::HardwareSetupFailed);
-
-				Result swRet = setupSoftwareParameter(capture);
-        
-				if(!swRet.ok()) {
-					return swRet;
-				}
-
-				// poll descriptors count
-				inCount = snd_pcm_poll_descriptors_count(capture);
-				if(inCount < 0) {
-					logAlsaError("snd_pcm_poll_descriptors_count(capture)", static_cast<int>(inCount));
-					return Result{Error::PollSetupFailed, snd_strerror(static_cast<int>(inCount))};
 				}
 			}
 
@@ -130,17 +197,6 @@ export namespace mka::audio {
 				ALSA_LOG_ERROR(snd_pcm_close(capture));
 				capture = nullptr;
 			}
-
-			if(playbackParameter) {
-				snd_pcm_hw_params_free(playbackParameter);
-				playbackParameter = nullptr;
-			}
-
-			if(captureParameter) {
-				snd_pcm_hw_params_free(captureParameter);
-				captureParameter = nullptr;
-			}
-
 			return mka::audio::Ok;
 		}
 
@@ -193,8 +249,8 @@ export namespace mka::audio {
 				snd_pcm_uframes_t framesPlayback = 0;
 				snd_pcm_uframes_t framesCapture  = 0;
 
-				bool readyPlayback = hasPlayback && beginPlayback(framesPlayback);
-				bool readyCapture  = hasCapture  && (revIn  & POLLIN) && beginCapture(framesCapture);
+				bool readyPlayback = hasPlayback && begin(playback, &outAreas, config.bufferSize, config.outChannels, playbackOffset, framesPlayback, outPtrs);
+				bool readyCapture  = hasCapture  && (revIn  & POLLIN) && begin(capture, &inAreas, config.bufferSize, config.inChannels, captureOffset, framesCapture, inPtrs);
 
 				if(!readyPlayback && !readyCapture) {
 					continue;
@@ -232,7 +288,7 @@ export namespace mka::audio {
 						playbackStarted = false;
 						continue;
 					}
-
+					
 					if(static_cast<snd_pcm_uframes_t>(committed) != frames) {
 						std::fprintf(stderr, "[ALSA] short playback commit: requested=%lu committed=%ld\n",
 							static_cast<unsigned long>(frames),
@@ -273,162 +329,11 @@ export namespace mka::audio {
 			}
 		}
 
-	private:
-		Result setupSoftwareParameter(snd_pcm_t* pcm) {
-
-			snd_pcm_sw_params_t* sw = nullptr;
-			snd_pcm_sw_params_alloca(&sw);
-
-			int err = snd_pcm_sw_params_current(pcm, sw);
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_sw_params_set_start_threshold(pcm, sw, config.bufferSize);
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_sw_params_set_avail_min(pcm, sw, config.bufferSize);
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_sw_params(pcm, sw);
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			return mka::audio::Ok;
-		}
-
-		Result setupHardwareParameter(snd_pcm_t* pcm, snd_pcm_hw_params_t* hw, uint32_t channels) {
-		
-			unsigned int		rate		= config.samplerate;
-			snd_pcm_uframes_t	bufferSize	= config.bufferSize * 2;
-			snd_pcm_uframes_t	periodSize	= config.bufferSize;	
-			snd_pcm_format_t	realFormat;
-
-			int err = snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_MMAP_NONINTERLEAVED);
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_FLOAT_LE);
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			ALSA_CHECK(snd_pcm_hw_params_get_format(hw, &realFormat), Error::SetupHardwareParameterFailed);
-
-			if(realFormat != SND_PCM_FORMAT_FLOAT_LE) {
-				return { Error::SetupHardwareParameterFailed, "Device does not support float" };
-			}
-
-			err = snd_pcm_hw_params_set_channels(pcm, hw, channels);		
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_hw_params_set_rate_near(pcm, hw, &rate, nullptr);			
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &bufferSize);		
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-
-			err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &periodSize, nullptr);	
-			ALSA_CHECK(err, Error::SetupHardwareParameterFailed);
-				
-			return mka::audio::Ok;
-		}
-
-		bool beginPlayback(snd_pcm_uframes_t& frames) {
-
-			if(config.outChannels == 0) {
-				return false;		
-			}
-
-			snd_pcm_sframes_t avail = snd_pcm_avail_update(playback);
-			
-			if(avail < 0) {
-				ALSA_LOG_ERROR(snd_pcm_recover(playback, avail, 1));
-				return false;
-			}
-
-			frames = std::min(
-					static_cast<snd_pcm_uframes_t>(avail), 
-					static_cast<snd_pcm_uframes_t>(config.bufferSize)
-			);
-
-			if(frames == 0) {
-				return false;
-			}
-
-			int err = snd_pcm_mmap_begin(playback, &outAreas, &playbackOffset, &frames);
-		   
-			if(err < 0) {
-				ALSA_LOG_ERROR(snd_pcm_recover(playback, err, 1));
-				return false;
-			}
-
-			for(uint32_t channel = 0; channel < config.outChannels; ++channel) {
-				outPtrs[channel] = reinterpret_cast<float*>(
-					static_cast<char*>(outAreas[channel].addr) 
-					+ (outAreas[channel].first / 8) 
-					+ playbackOffset * (outAreas[channel].step / 8)
-				);
-			}
-
-			playbackFrames = frames;
-			return true;
-		}
-
-		bool beginCapture(snd_pcm_uframes_t& frames) {
-
-			if(config.inChannels == 0) {
-				return false;
-			}
-			
-			snd_pcm_sframes_t avail = snd_pcm_avail_update(capture);
-			
-			if(avail < 0) {
-				ALSA_LOG_ERROR(snd_pcm_recover(capture, avail, 1));
-				return false;
-			}
-
-			frames = std::min(
-					static_cast<snd_pcm_uframes_t>(avail), 
-					static_cast<snd_pcm_uframes_t>(config.bufferSize)
-			);
-
-			if(frames == 0) {
-				return false;
-			}
-
-			int err = snd_pcm_mmap_begin(capture, &inAreas, &captureOffset, &frames);
-		   
-			if(err < 0) {
-				ALSA_LOG_ERROR(snd_pcm_recover(capture, err, 1));
-				return false;
-			}
-
-			for(uint32_t channel = 0; channel < config.inChannels; ++channel) {
-				inPtrs[channel] = reinterpret_cast<float*>(
-					static_cast<char*>(inAreas[channel].addr) 
-					+ (inAreas[channel].first / 8) 
-					+ captureOffset * (inAreas[channel].step / 8)
-				);
-			}
-			
-			captureFrames = frames;
-
-		    return true;
-		}
-
-		void processBlock(snd_pcm_uframes_t frames) {
-		
-		}
-
-		void commit() {
-			ALSA_LOG_ERROR(snd_pcm_mmap_commit(playback, playbackOffset, playbackFrames));
-			
-			if(config.inChannels) {
-				ALSA_LOG_ERROR(snd_pcm_mmap_commit(capture, captureOffset, captureFrames));
-			}
-		}
 
 	private:
 
 		snd_pcm_t*				playback			 = nullptr;
 		snd_pcm_t*				capture				 = nullptr;
-		snd_pcm_hw_params_t*	playbackParameter	 = nullptr;
-		snd_pcm_hw_params_t*	captureParameter	 = nullptr;
 		std::vector<pollfd>		pfds;
 		std::vector<float*>		outPtrs;
 		std::vector<float*>		inPtrs;
@@ -441,7 +346,7 @@ export namespace mka::audio {
 
 		snd_pcm_uframes_t playbackOffset = 0;
 		snd_pcm_uframes_t captureOffset  = 0;
-		snd_pcm_uframes_t playbackFrames = 0;
-		snd_pcm_uframes_t captureFrames  = 0;
+//		snd_pcm_uframes_t playbackFrames = 0;
+//		snd_pcm_uframes_t captureFrames  = 0;
 	};
 }
