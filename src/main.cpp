@@ -2,7 +2,7 @@
 #include <iostream>
 #include <cmath>
 
-import audio.alsa;
+import audio.jack;
 
 void audio_callback(const mka::audio::Block& block) {
 	static float phase = {};
@@ -21,7 +21,7 @@ void audio_callback(const mka::audio::Block& block) {
 int main() 
 {
 
-	mka::audio::ALSA alsa;
+	mka::audio::JACK jack;
 	
 	mka::audio::Config config {
 		.samplerate = 44100,
@@ -32,20 +32,20 @@ int main()
 		.name = "default"
 	};
 
-	auto ret = alsa.open(config);
+	auto ret = jack.open(config);
 	if(!ret.ok()) {
 		std::println("error::{}", ret.message);
 		return 1;
 	}
-	alsa.setCallback(audio_callback);
-	alsa.start();
+	jack.setCallback(audio_callback);
+	jack.start();
 	
 	std::println("Press Enter to stop audio...\n");
 	std::cin.get();
 	
-	alsa.stop();
+	jack.stop();
 
-	ret = alsa.close();
+	ret = jack.close();
 	if(!ret.ok()) std::println("error::{}", ret.message);
 
 	return 0;
