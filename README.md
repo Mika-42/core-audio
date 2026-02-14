@@ -5,7 +5,7 @@ C++ version : 26
 ```cpp
 import audio.<type>;
 ```
-<type> = alsa, jack, wasapi, asio, coreaudio, etc...
+type = alsa, jack, wasapi, asio, coreaudio, etc...
 replace with the desire plateform.
 
 ### 2. setup the callback function
