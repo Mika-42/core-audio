@@ -2,10 +2,23 @@
 C++ version : 26
 
 ### 1. import the audio core
+
 ```cpp
 import audio.<type>;
 ```
-type = alsa, jack, wasapi, asio, coreaudio, etc...
+
+| type       | plateform | supported |
+|:-----------|:----------|:----------|
+| alsa       | linux     | Yes       |
+| jack       | linux     | No        |
+| pipewire   | linux     | No        |
+| pulseaudio | linux     | No        |
+| wasapi     | windows   | No        |
+| asio       | windows   | No        |
+| ds         | windows   | No        |
+| wmme       | windows   | No        |
+| coreaudio  | mac       | No        |
+
 replace with the desire plateform.
 
 ### 2. setup the callback function
@@ -47,8 +60,22 @@ This struct describe how you audio channel should be.
 
 your code must following this pipeline :
 
-```
-(open)->(set callback)->(start)->(stop)->(close)
+```mermaid
+graph LR
+	A(("Begin"))
+	B(["open"])
+	C(["set callback"])
+	D(["start"])
+	E(["stop"])
+	F(["close"])
+	G(("End"))
+
+	A --> B --> C --> D --> E --> F --> G
+
+	classDef step fill:#775500
+  	class B,C,D,E,F step;
+	style A fill:#007700
+	style G fill:#770000
 ```
 
 ### 5. Full code
