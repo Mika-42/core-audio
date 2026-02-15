@@ -91,7 +91,7 @@ import audio.alsa;
 
 void audio_callback(const mka::audio::Block& block) {
 
-	for(uint32_t channel = 0; channel < block.channels; ++channel) {
+	for(uint32_t channel = 0; channel < block.outChannels; ++channel) {
 	    for(uint32_t frame = 0; frame < block.frames; ++frame) {	
 			block.out[channel][frame] = /* feed */; 
 		}
@@ -103,9 +103,9 @@ int main()
 
 	mka::audio::ALSA alsa;
 	
-	mka::audio::config config {
+	mka::audio::Config config {
 		.samplerate = 44100,
-		.buffersize = 512,
+		.bufferSize = 512,
 		.outChannels = 2,       // stereo output
 		.inChannels = 1,        // mono input
         .audioFormat = mka::audio::Format::Float32,
