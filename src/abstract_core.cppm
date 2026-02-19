@@ -14,6 +14,7 @@ import audio.block;
 import audio.config;
 
 export namespace mka::audio {
+
 	/*
 	 * ! callback must be set before start() !
 	 */
@@ -24,6 +25,8 @@ export namespace mka::audio {
 		virtual ~AbstractCoreAudio() {
 			stop();
 		}
+
+		virtual std::vector<Device> devicesList() = 0;
 	
 		virtual Result open(const Config& config) = 0;	
 		virtual	Result close() = 0;
@@ -46,6 +49,7 @@ export namespace mka::audio {
 
 		virtual void stop() {
 			if(!running.exchange(false)) return;
+			
 			if(audioThread.joinable()) audioThread.join();
 		}	
 
@@ -59,7 +63,7 @@ export namespace mka::audio {
 		Config				config;
 		Callback			callback = nullptr;
 		std::atomic<bool>	running	= false;
-
+	
 	private:
 		std::thread audioThread;
 	};

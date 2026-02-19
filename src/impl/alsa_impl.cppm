@@ -31,8 +31,8 @@ inline void logAlsaError(const char* what, int code) {
 export module audio.alsa;
 export import audio.block;
 export import audio.config;
+export import audio.error;
 
-import audio.error;
 import audio.abstract_core;
 
 //---- alsa wrapper ----//
@@ -45,6 +45,25 @@ snd_pcm_format_t select_format(mka::audio::Format fmt) {
         case mka::audio::Format::Float64: return SND_PCM_FORMAT_FLOAT64_LE;
     }
     return SND_PCM_FORMAT_FLOAT_LE;
+}
+
+bool add_format(std::vector<mka::audio::Format>& v, snd_pcm_format_t f) {
+    auto push = [&](mka::audio::Format fmt)
+    {
+        if (std::find(v.begin(), v.end(), fmt) == v.end()) {
+			v.push_back(fmt);
+		}
+    };
+
+    switch (f)
+    {
+        case SND_PCM_FORMAT_FLOAT_LE:    push(mka::audio::Format::Float32); return true;
+        case SND_PCM_FORMAT_FLOAT64_LE:  push(mka::audio::Format::Float64); return true;
+        case SND_PCM_FORMAT_S16_LE:      push(mka::audio::Format::Int16);   return true;
+        case SND_PCM_FORMAT_S24_LE:      push(mka::audio::Format::Int24);   return true;
+        case SND_PCM_FORMAT_S32_LE:      push(mka::audio::Format::Int32);   return true;
+        default: return false;
+    }
 }
 
 mka::audio::Result setup_pcm(
@@ -152,6 +171,10 @@ export namespace mka::audio {
 	
 	public:
 		ALSA() = default;
+		
+		//const std::vector<Device> devicesList() {
+			//todo	
+		//}
 		
 		Result open(const Config& cfg) override {
 			config = cfg;

@@ -2,20 +2,52 @@ module;
 
 #include <string>
 #include <cstdint>
+#include <vector>
 
 export module audio.config;
 
 export namespace mka::audio {
 	
+	namespace supported {
+		inline constexpr uint32_t Samplerates[] {
+			44'100, 48'000, 88'200, 96'000, 176'400, 192'000
+		};
+
+		inline constexpr uint32_t bufferSizes[] {
+			16, 32, 64, 128, 256, 512, 1'024, 2'048, 4'096, 8'192
+		};
+	}
+
 	enum class Format {
+
 		Int16,
 		Int24,
 		Int32,
 		Float32,
 		Float64,
+
+	};
+
+	struct Channel {
+		std::string	name;
+		bool		input;
+	};
+
+	struct Device {
+
+		std::string				name;
+		
+		uint32_t				id = 0;
+		
+		std::vector<Channel>	channels;
+		std::vector<Format>		formats;
+		std::vector<uint32_t>	samplerates;
+		std::vector<uint32_t>	bufferSizes;
+
 	};
 
 	struct Config {
+	
 		uint32_t	samplerate;
 		uint32_t	bufferSize;
 		uint32_t	outChannels;
