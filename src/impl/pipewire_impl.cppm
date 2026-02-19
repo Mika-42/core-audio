@@ -4,6 +4,7 @@ module;
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -109,7 +110,6 @@ static void registryEventGlobal(
 	if (std::strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
 		const char* nodeIdText = spa_dict_lookup(props, PW_KEY_NODE_ID);
 		const char* directionText = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
-
 		if (!nodeIdText || !directionText) {
 			return;
 		}
@@ -163,77 +163,34 @@ static const pw_core_events coreEvents{
 	.done = coreEventDoneWithLoop,
 };
 
-static std::vector<mka::audio::Device> discoverPipeWireDevices() {
-	DiscoveryState state;
-	std::vector<mka::audio::Device> discovered;
-
-	pw_init(nullptr, nullptr);
-
-	pw_main_loop* loop = pw_main_loop_new(nullptr);
-	if (!loop) {
-		return discovered;
-	}
-
-	pw_context* context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
-	if (!context) {
-		pw_main_loop_destroy(loop);
-		return discovered;
-	}
-
-	pw_core* core = pw_context_connect(context, nullptr, 0);
-	if (!core) {
-		pw_context_destroy(context);
-		pw_main_loop_destroy(loop);
-		return discovered;
-	}
-
-	pw_registry* registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-	if (!registry) {
-		pw_core_disconnect(core);
-		pw_context_destroy(context);
-		pw_main_loop_destroy(loop);
-		return discovered;
-	}
-
-	spa_hook registryListener{};
-	spa_hook coreListener{};
-	SyncData syncData{ .state = &state, .loop = loop };
-
-	pw_registry_add_listener(registry, &registryListener, &registryEvents, &state);
-	pw_core_add_listener(core, &coreListener, &coreEvents, &syncData);
-
-	// We block until the core acknowledges this sync sequence.
-	// This guarantees that all currently known devices/nodes/ports were seen.
-	state.seq = pw_core_sync(core, PW_ID_CORE, 0);
-	pw_main_loop_run(loop);
-
-	for (auto& [_, device] : state.devices) {
-		discovered.push_back(std::move(device));
-	}
-
-	std::sort(discovered.begin(), discovered.end(), [](const mka::audio::Device& left, const mka::audio::Device& right) {
-		return left.name < right.name;
-	});
-
-	spa_hook_remove(&coreListener);
-	spa_hook_remove(&registryListener);
-	pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
-	pw_core_disconnect(core);
-	pw_context_destroy(context);
-	pw_main_loop_destroy(loop);
-	pw_deinit();
-
-	return discovered;
-}
-
 } // namespace
 
 export namespace mka::audio {
 
 class PipeWire : public AbstractCoreAudio {
 public:
+	PipeWire() {
+		// IMPORTANT:
+		// On initialise PipeWire au niveau de l'instance backend, pas dans une fonction utilitaire.
+		// Cela évite les init/deinit répétés et prépare une architecture propre pour le futur streaming temps réel.
+		pw_init(nullptr, nullptr);
+		initialized = initRuntime();
+	}
+
+	~PipeWire() override {
+		shutdownRuntime();
+		pw_deinit();
+	}
+
 	std::vector<Device> devicesList() override {
-		return discoverPipeWireDevices();
+		if (!initialized) {
+			return {};
+		}
+
+		// On sérialise l'énumération pour ne pas exécuter plusieurs discovery en parallèle
+		// sur la même boucle PipeWire. C'est plus sûr et plus simple à maintenir.
+		std::lock_guard<std::mutex> lock(discoveryMutex);
+		return discoverDevicesOnce();
 	}
 
 	Result open(const Config& cfg) override {
@@ -247,6 +204,93 @@ public:
 
 protected:
 	void run() override {}
+
+private:
+	bool initRuntime() {
+		loop = pw_main_loop_new(nullptr);
+		if (!loop) {
+			return false;
+		}
+
+		context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
+		if (!context) {
+			shutdownRuntime();
+			return false;
+		}
+
+		core = pw_context_connect(context, nullptr, 0);
+		if (!core) {
+			shutdownRuntime();
+			return false;
+		}
+
+		return true;
+	}
+
+	void shutdownRuntime() {
+		if (core) {
+			pw_core_disconnect(core);
+			core = nullptr;
+		}
+
+		if (context) {
+			pw_context_destroy(context);
+			context = nullptr;
+		}
+
+		if (loop) {
+			pw_main_loop_destroy(loop);
+			loop = nullptr;
+		}
+	}
+
+	std::vector<Device> discoverDevicesOnce() {
+		DiscoveryState state;
+		std::vector<Device> discovered;
+
+		if (!core || !loop) {
+			return discovered;
+		}
+
+		// Le registry est une vue dynamique de l'univers PipeWire courant.
+		// On l'ouvre pour la découverte, puis on le détruit immédiatement après.
+		pw_registry* registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+		if (!registry) {
+			return discovered;
+		}
+
+		spa_hook registryListener{};
+		spa_hook coreListener{};
+		SyncData syncData{ .state = &state, .loop = loop };
+
+		pw_registry_add_listener(registry, &registryListener, &registryEvents, &state);
+		pw_core_add_listener(core, &coreListener, &coreEvents, &syncData);
+
+		// On envoie un sync token puis on bloque la loop jusqu'à l'ack.
+		// Cela garantit une liste complète (Device/Node/Port) à l'instant T.
+		state.seq = pw_core_sync(core, PW_ID_CORE, 0);
+		pw_main_loop_run(loop);
+
+		for (auto& [_, device] : state.devices) {
+			discovered.push_back(std::move(device));
+		}
+
+		std::sort(discovered.begin(), discovered.end(), [](const Device& left, const Device& right) {
+			return left.name < right.name;
+		});
+
+		spa_hook_remove(&coreListener);
+		spa_hook_remove(&registryListener);
+		pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
+
+		return discovered;
+	}
+
+	pw_main_loop* loop = nullptr;
+	pw_context* context = nullptr;
+	pw_core* core = nullptr;
+	bool initialized = false;
+	std::mutex discoveryMutex;
 };
 
 } // namespace mka::audio
