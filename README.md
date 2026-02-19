@@ -11,7 +11,7 @@ import audio.<type>;
 |:-----------|:----------|:----------|
 | alsa       | linux     | Yes       |
 | jack       | linux     | No        |
-| pipewire   | linux     | No        |
+| pipewire   | linux     | Yes       |
 | pulseaudio | linux     | No        |
 | wasapi     | windows   | No        |
 | asio       | windows   | No        |
@@ -135,3 +135,4 @@ int main()
 	return 0;
 }
 ```
+

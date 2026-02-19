@@ -21,13 +21,14 @@ MODULE_SRCS := \
     $(SRC_DIR)/utils/block.cppm \
     $(SRC_DIR)/abstract_core.cppm \
     $(SRC_DIR)/impl/alsa_impl.cppm \
-	$(SRC_DIR)/impl/jack_impl.cppm
+	$(SRC_DIR)/impl/jack_impl.cppm \
+	$(SRC_DIR)/impl/pipewire_impl.cppm
 
 MODULE_OBJS := $(patsubst $(SRC_DIR)/%.cppm,$(OBJ_DIR)/%.o,$(MODULE_SRCS))
 
 MAIN_SRC := $(SRC_DIR)/main.cpp
 
-LIBS := -lasound -ljack
+LIBS := -lasound -ljack -lpipewire-0.3
 
 #=============================================================================#
 # Build target
