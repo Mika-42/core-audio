@@ -7,17 +7,11 @@ C++ version : 26
 import audio.<type>;
 ```
 
-| type       | plateform | supported |
-|:-----------|:----------|:----------|
-| alsa       | linux     | Yes       |
-| jack       | linux     | No        |
-| pipewire   | linux     | No        |
-| pulseaudio | linux     | No        |
-| wasapi     | windows   | No        |
-| asio       | windows   | No        |
-| ds         | windows   | No        |
-| wmme       | windows   | No        |
-| coreaudio  | mac       | No        |
+| type      | alsa  | jack  | pipewire | pulseaudio | wasapi  | asio    | ds      | wmme    | coreaudio |
+|-----------|-------|-------|----------|------------|---------|---------|---------|---------|-----------|
+| supported | no    | no    | yes      | no         | no      | no      | no      | no      | no        |
+| plateform | linux | linux | linux    | linux      | windows | windows | windows | windows | macos     |
+
 
 replace with the desire plateform.
 
