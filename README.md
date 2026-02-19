@@ -22,8 +22,8 @@ replace with the desire plateform.
 ```cpp
 void <callback_name>(const mka::audio::Block& block);
 ```
-
-The callback function **must obligatory** respect this signature. 
+> [!WARNING]
+> The callback function **must obligatory** respect this signature. 
 
 **2.2 - mka::audio::Block structure**
 
