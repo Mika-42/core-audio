@@ -29,16 +29,15 @@ export namespace mka::audio {
 	};
 
 	struct Channel {
+		uint32_t	id = 0;
 		std::string	name;
 		bool		input;
 	};
 
 	struct Device {
 
-		std::string				name;
-		
 		uint32_t				id = 0;
-		
+		std::string				name;	
 		std::vector<Channel>	channels;
 		std::vector<Format>		formats;
 		std::vector<uint32_t>	samplerates;

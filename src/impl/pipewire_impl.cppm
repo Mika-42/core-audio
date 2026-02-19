@@ -1,5 +1,6 @@
 module;
-#include <iostream>
+#include <print>
+#include <thread>
 
 #include <vector>
 #include <string>
@@ -55,6 +56,9 @@ static void registry_event_global(
 		auto& device	= devices[id];
 		device.name		= description;
 		device.id		= id;
+
+//		std::println("({}) {}", device.id, device.name); 
+	
 	}
 
 	// Nodes
@@ -90,7 +94,8 @@ static void registry_event_global(
         if (devIt == devices.end()) return;
 
         mka::audio::Channel channel;
-        channel.name  = port_name;
+        channel.id	  = nde_id;
+		channel.name  = port_name;
         channel.input = (strcmp(direction, "in") == 0);
 
         devIt->second.channels.push_back(std::move(channel));
@@ -119,16 +124,38 @@ export namespace mka::audio {
 		
 			spa_zero(registry_listener);
 			pw_registry_add_listener(registry, &registry_listener, &registry_events, nullptr);
+		auto loopThread = std::thread([this]() {
 			pw_main_loop_run(loop);
+		});
 
+		// Petite pause pour laisser le temps à la registry
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+		pw_main_loop_quit(loop);
+		loopThread.join();	
+		}
+
+		void show() {	
+			for(const auto& [_, d] : devices) {
+				std::println("Device {{"); 
+				std::println("\tid: {},\n\tname: {},\n\tIO: {}", d.id, d.name, d.channels.size()); 
+
+				for(const auto& c : d.channels) {
+					std::println("\tChannel {{");
+					std::println("\t\tid: {},", c.id); 
+					std::println("\t\tname: {},", c.name); 
+					std::println("\t\tinput: {}\n\t}}",c.input); 
+				}
+				std::println("}}\n");
+			}
+		}
+
+		~PipeWire() {
 			pw_proxy_destroy((struct pw_proxy*)registry);
 	        pw_core_disconnect(core);
 		    pw_context_destroy(context);
 			pw_main_loop_destroy(loop);
 
-			for(const auto& [_, dev] : devices) {
-				std::cout << dev.name << '\n';
-			}
 		}
 
 		std::vector<Device> devicesList() override {}

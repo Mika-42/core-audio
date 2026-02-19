@@ -22,7 +22,7 @@ int main()
 {
 
 	mka::audio::PipeWire engine;
-	
+	engine.show();	
 	return 0;
 
 	mka::audio::Config config {
