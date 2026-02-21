@@ -30,7 +30,7 @@ export namespace mka::audio {
 	};
 
 	struct Channel {
-		std::string	name;
+		std::string	port;
 		std::string	deviceName;
 		std::string	id;
 

@@ -26,7 +26,7 @@ int main()
 	auto l = engine.getChannels();
     for (auto& ch : l) {
 		
-		std::println("{{\tdevice name:\t{}, \n\tname:\t\t{},\n\tid:\t\t{},\n\tsamplerate:\t{},\n\tbuffer size:\t{},\n\tis input:\t{},\n}}\n", ch.deviceName, ch.name, ch.id, *ch.samplerate, *ch.bufferSize, ch.input);
+		std::println("{{\tdevice name:\t{}, \n\tport:\t\t{},\n\tid:\t\t{},\n\tsamplerate:\t{},\n\tbuffer size:\t{},\n\tis input:\t{},\n}}\n", ch.deviceName, ch.port, ch.id, *ch.samplerate, *ch.bufferSize, ch.input);
     }
 	return 0;
 	
