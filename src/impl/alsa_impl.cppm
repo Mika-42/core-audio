@@ -1,4 +1,6 @@
 module;
+
+#include <iostream>
 #include <cstring>
 #include <algorithm>
 #include <atomic>
@@ -164,6 +166,76 @@ bool begin(
 	return true;
 }
 
+export int list_dev() {
+    int card = -1;
+
+    if (snd_card_next(&card) < 0 || card < 0) {
+        std::cerr << "Aucune carte ALSA trouvée\n";
+        return 1;
+    }
+
+    while (card >= 0) {
+
+        snd_ctl_t* ctl = nullptr;
+        char card_name[32];
+        sprintf(card_name, "hw:%d", card);
+
+        if (snd_ctl_open(&ctl, card_name, 0) < 0) {
+            std::cerr << "Impossible d'ouvrir " << card_name << "\n";
+            snd_card_next(&card);
+            continue; // ⚠️ on ne ferme pas ctl ici
+        }
+
+        snd_ctl_card_info_t* info;
+        snd_ctl_card_info_alloca(&info);
+
+        if (snd_ctl_card_info(ctl, info) == 0) {
+            std::cout << "Carte " << card << " : "
+                      << snd_ctl_card_info_get_name(info)
+                      << "\n";
+        }
+
+        int device = -1;
+
+        while (true) {
+            if (snd_ctl_pcm_next_device(ctl, &device) < 0)
+                break;
+
+            if (device < 0)
+                break;
+
+            snd_pcm_info_t* pcm_info;
+            snd_pcm_info_alloca(&pcm_info);
+
+            snd_pcm_info_set_device(pcm_info, device);
+            snd_pcm_info_set_subdevice(pcm_info, 0);
+
+            snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_PLAYBACK);
+            if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
+                std::cout << "  Device " << device
+                          << " (Playback): "
+                          << snd_pcm_info_get_name(pcm_info)
+                          << "\n";
+            }
+
+            snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_CAPTURE);
+            if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
+                std::cout << "  Device " << device
+                          << " (Capture): "
+                          << snd_pcm_info_get_name(pcm_info)
+                          << "\n";
+            }
+        }
+
+        snd_ctl_close(ctl);
+
+        // ⚠️ TRÈS IMPORTANT
+        snd_card_next(&card);
+    }
+
+    return 0;
+
+}
 //---------------------//
 export namespace mka::audio {
 
@@ -172,9 +244,9 @@ export namespace mka::audio {
 	public:
 		ALSA() = default;
 		
-		//const std::vector<Device> devicesList() {
-			//todo	
-		//}
+		std::vector<Device> devicesList() {
+			return std::vector<Device>();
+		}
 		
 		Result open(const Config& cfg) override {
 			config = cfg;

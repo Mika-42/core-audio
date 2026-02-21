@@ -2,7 +2,7 @@
 #include <iostream>
 #include <cmath>
 
-import audio.pipewire;
+import audio.jack;
 
 void audio_callback(const mka::audio::Block& block) {
 	static float phase = {};
@@ -21,10 +21,15 @@ void audio_callback(const mka::audio::Block& block) {
 int main() 
 {
 
-	mka::audio::PipeWire engine;
-	engine.show();	
+	mka::audio::JACK engine;
+	
+	auto l = engine.getChannels();
+    for (auto& ch : l) {
+		
+		std::println("{{\tdevice name:\t{}, \n\tname:\t\t{},\n\tid:\t\t{},\n\tsamplerate:\t{},\n\tbuffer size:\t{},\n\tis input:\t{},\n}}\n", ch.deviceName, ch.name, ch.id, *ch.samplerate, *ch.bufferSize, ch.input);
+    }
 	return 0;
-
+	
 	mka::audio::Config config {
 		.samplerate = 44100,
 		.bufferSize = 512,
@@ -52,3 +57,4 @@ int main()
 
 	return 0;
 }
+

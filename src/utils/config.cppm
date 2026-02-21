@@ -3,6 +3,7 @@ module;
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <optional>
 
 export module audio.config;
 
@@ -29,20 +30,15 @@ export namespace mka::audio {
 	};
 
 	struct Channel {
-		uint32_t	id = 0;
 		std::string	name;
-		bool		input;
-	};
+		std::string	deviceName;
+		std::string	id;
 
-	struct Device {
+		std::optional<uint32_t> samplerate;
+	    std::optional<uint32_t> bufferSize;
+	    std::optional<Format> format;
 
-		uint32_t				id = 0;
-		std::string				name;	
-		std::vector<Channel>	channels;
-		std::vector<Format>		formats;
-		std::vector<uint32_t>	samplerates;
-		std::vector<uint32_t>	bufferSizes;
-
+		bool input;
 	};
 
 	struct Config {

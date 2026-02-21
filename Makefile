@@ -15,9 +15,9 @@ DEBUGGER := gdb
 CPP_VERSION := -std=c++26
 DBG_FLAGS := -g -Og
 CPP_FLAGS := -Wall -Wextra -Werror -Wpedantic -Werror=unused-result
-PW_FLAGS := $(shell pkg-config --cflags --libs libpipewire-0.3)
+# PW_FLAGS := $(shell pkg-config --cflags --libs libpipewire-0.3)
 
-LIBS := -lasound -ljack
+LIBS := -ljack # -lasound
 
 #=============================================================================#
 # Directories
@@ -40,9 +40,9 @@ MODULE_SRCS := \
     $(SRC_DIR)/utils/config.cppm \
     $(SRC_DIR)/utils/block.cppm \
     $(SRC_DIR)/abstract_core.cppm \
-    $(SRC_DIR)/impl/alsa_impl.cppm \
-    $(SRC_DIR)/impl/pipewire_impl.cppm \
 	$(SRC_DIR)/impl/jack_impl.cppm
+#    $(SRC_DIR)/impl/alsa_impl.cppm \
+#    $(SRC_DIR)/impl/pipewire_impl.cppm \
 
 MODULE_OBJS := $(patsubst $(SRC_DIR)/%.cppm,$(OBJ_DIR)/%.o,$(MODULE_SRCS))
 
@@ -60,11 +60,11 @@ all: $(APP)
 # Compile all modules
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cppm
 	@mkdir -p $(dir $@)
-	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) $(PW_FLAGS) -fmodules -c $< -o $@
+	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) -fmodules -c $< -o $@
 
 # Link main app
 $(APP): $(MODULE_OBJS) $(MAIN_SRC)
-	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) $(PW_FLAGS) -fmodules $(MAIN_SRC) $(MODULE_OBJS) $(LIBS) -o $@
+	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) -fmodules $(MAIN_SRC) $(MODULE_OBJS) $(LIBS) -o $@
 
 # Build all examples
 examples: $(EXAMPLE_BINS)

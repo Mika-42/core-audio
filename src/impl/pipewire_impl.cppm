@@ -158,7 +158,7 @@ export namespace mka::audio {
 
 		}
 
-		std::vector<Device> devicesList() override {}
+		std::vector<Device> deviceList() override {}
 	
 		virtual Result open(const Config& config) {}
 		virtual	Result close() {}

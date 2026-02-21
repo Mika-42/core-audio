@@ -26,7 +26,7 @@ export namespace mka::audio {
 			stop();
 		}
 
-		virtual std::vector<Device> devicesList() = 0;
+		virtual std::vector<Channel> getChannels() = 0;
 	
 		virtual Result open(const Config& config) = 0;	
 		virtual	Result close() = 0;
