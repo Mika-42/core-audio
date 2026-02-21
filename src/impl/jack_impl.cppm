@@ -68,7 +68,10 @@ export namespace mka::audio {
 			return channels;
 		}
 
-		Result open(const Config& config) override {}
+		Result open(const Channel& channel) override {
+		
+		}
+
 		Result close() override {
 			if (client) {
 				jack_client_close(client);
@@ -82,6 +85,7 @@ export namespace mka::audio {
 
 	private:
 		jack_client_t* client;
+		std::vector<jack_port_t*> outPorts;
 	};
 }
 

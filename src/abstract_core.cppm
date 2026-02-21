@@ -28,7 +28,7 @@ export namespace mka::audio {
 
 		virtual std::vector<Channel> getChannels() = 0;
 	
-		virtual Result open(const Config& config) = 0;	
+		virtual Result open(const Channel& channel) = 0;	
 		virtual	Result close() = 0;
 
 		virtual void start() {
@@ -60,7 +60,6 @@ export namespace mka::audio {
 	protected:
 		virtual void run() = 0;
 
-		Config				config;
 		Callback			callback = nullptr;
 		std::atomic<bool>	running	= false;
 	

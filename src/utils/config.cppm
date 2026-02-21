@@ -10,7 +10,7 @@ export module audio.config;
 export namespace mka::audio {
 	
 	namespace supported {
-		inline constexpr uint32_t Samplerates[] {
+		inline constexpr uint32_t SampleRates[] {
 			44'100, 48'000, 88'200, 96'000, 176'400, 192'000
 		};
 
@@ -34,21 +34,10 @@ export namespace mka::audio {
 		std::string	deviceName;
 		std::string	port;
 
-		std::optional<uint32_t> samplerate;
+		std::optional<uint32_t> sampleRate;
 	    std::optional<uint32_t> bufferSize;
 	    std::optional<Format> format;
 
 		bool input;
-	};
-
-	struct Config {
-	
-		uint32_t	samplerate;
-		uint32_t	bufferSize;
-		uint32_t	outChannels;
-		uint32_t	inChannels;
-		Format		audioFormat;
-
-		std::string name;
 	};
 }
