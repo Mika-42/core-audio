@@ -17,8 +17,12 @@ export import audio.error;
 import audio.abstract_core;
 
 namespace mka::audio {
-
+	
+	// JACK Callbacks
+	int sampleRateCallback(jack_nframes_t nframes, void* arg);
+	int bufferSizeCallback(jack_nframes_t nframes, void* arg);
 	int processCallback(jack_nframes_t nframes, void* arg);
+	int xrunCallback(void* arg);
 	void shutdownCallback(void* arg);
 
 	struct JackChannelHandle {
@@ -36,20 +40,26 @@ namespace mka::audio {
 
 			if(!client) return;
 
-			jack_set_process_callback(client, processCallback, this);
+			//setting callbacks
 			jack_on_shutdown(client, shutdownCallback, this);
-	
-			openedChannels.reserve(16);
+			jack_set_xrun_callback(client, xrunCallback, this);	
+			jack_set_process_callback(client, processCallback, this);
+			jack_set_sample_rate_callback(client, sampleRateCallback, this);
+			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
 
+			//setting sample rate & buffer size
 			currentSampleRate.store(jack_get_sample_rate(client));
 			currentBufferSize.store(jack_get_buffer_size(client));
+			
+			sampleRate.store(currentSampleRate.load(std::memory_order_relaxed));
+			bufferSize.store(currentBufferSize.load(std::memory_order_relaxed));
 		}
 
 		~JACK() override {
 			close();
 		}
 
-		std::vector<Channel> getChannels() {
+		std::vector<Channel> getChannels() override {
 			if (!client) return {};
 		
 			const char** ports = jack_get_ports(client, nullptr, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical);
@@ -165,11 +175,13 @@ namespace mka::audio {
 		void run() override {}
 
 	private:
-
+		friend int bufferSizeCallback(jack_nframes_t nframes, void* arg);
+		friend int sampleRateCallback(jack_nframes_t nframes, void* arg);
 		friend int processCallback(jack_nframes_t nframes, void* arg);
+		friend int xrunCallback(void* arg);
 		friend void shutdownCallback(void* arg);
 
-		jack_client_t* client;
+		jack_client_t* client = nullptr;
 		std::vector<JackChannelHandle> openedChannels;
 		
 		size_t inputCounter = 0;
@@ -177,11 +189,30 @@ namespace mka::audio {
 		
 		std::atomic<uint32_t> currentSampleRate = 0;
 		std::atomic<uint32_t> currentBufferSize = 0;
+		std::atomic<uint32_t> xrunCount			= 0;
 	};
+
+	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
+		auto* engine = static_cast<JACK*>(arg);
+		engine->currentSampleRate.store(nframes);
+		return 0;
+	}
+
+	int bufferSizeCallback(jack_nframes_t nframes, void* arg) {
+		auto* engine = static_cast<JACK*>(arg);
+		engine->currentBufferSize.store(nframes);
+		return 0;
+	}
 
 	void shutdownCallback(void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
-		engine->running.store(false, std::memory_order_release);
+		engine->running.store(false);
+	}
+
+	int xrunCallback(void* arg) {
+		auto* engine = static_cast<JACK*>(arg);
+		engine->xrunCount.fetch_add(1);
+		return 0;
 	}
 
 	int processCallback(jack_nframes_t nframes, void* arg) {
@@ -197,7 +228,7 @@ namespace mka::audio {
 
 			uint32_t sr = ch.config.sampleRate.value_or(engine->currentSampleRate);
 		
-			if(sr != engine->currentSampleRate) {
+			if(sr != engine->currentSampleRate.load()) {
 				//resampling
 			}
 
