@@ -1,19 +1,25 @@
 module;
 
 #include <cstdint>
+#include <cstddef>
 
 export module audio.block;
 
 export namespace mka::audio {
 	
-	struct Block {
-		const uint32_t		sampleRate;
-		const uint32_t		outChannels;
-		const uint32_t		inChannels;
-		const uint32_t		frames;
-		float* const* const	out;
-		float* const* const	in;
+	constexpr size_t MAX_CHANNEL_COUNT = 64;
+
+	struct Block {	
+		size_t	channelCount = 0;	
+		float*	data[MAX_CHANNEL_COUNT] = {};
 	};
 
-	typedef void(*Callback)(const Block&);
+	struct ChannelInfo {
+		Block	input;	
+		Block	output;	
+		size_t	sampleRate = 0;
+		size_t	frameCount = 0;
+	};
+
+	typedef void(*Callback)(const ChannelInfo&);
 }

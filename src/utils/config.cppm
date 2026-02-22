@@ -1,4 +1,4 @@
-module;
+channelInfo.input.channelCountmodule;
 
 #include <string>
 #include <cstdint>

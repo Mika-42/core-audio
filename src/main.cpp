@@ -4,27 +4,22 @@
 
 import audio.jack;
 
-void audio_callback(const mka::audio::Block& block) {
+void audio_callback(const mka::audio::ChannelInfo& info) {
 	static float phase = {};
 
-	for(uint32_t i = 0; i < block.frames; ++i) {
+	for(uint32_t i = 0; i < info.frameCount; ++i) {
 		float sample = sinf(phase);
 
-		phase += 2.0f * M_PI * 440.00f / block.sampleRate;
+		phase += 2.0f * M_PI * 440.00f / info.sampleRate;
 
-		for(uint32_t ch = 0; ch < block.outChannels; ++ch) {
-			block.out[ch][i] = sample;
+		for(uint32_t ch = 0; ch < info.output.channelCount; ++ch) {
+			info.output.data[ch][i] = sample;
 		}
 	}
 }
 
-int main() 
-{
-
-	mka::audio::JACK engine;
-	
-	auto l = engine.getChannels();
-    for (auto& ch : l) {
+void printChannels(const std::vector<mka::audio::Channel>& channels) {
+    for (auto& ch : channels) {
 		
 		std::println("{{");
 		std::println("\tdevice name:\t{},", ch.deviceName);
@@ -35,6 +30,24 @@ int main()
 		std::println("\tis input:\t{}", ch.input);
 		std::println("}}\n");
     }
+}
+int main() 
+{
+
+	mka::audio::JACK engine;
+	
+	auto l = engine.getChannels();
+	printChannels(l);
+	int choice = 0;
+	std::cout << ">> enter number: ";
+	std::cin >> choice;
+
+	engine.setCallback(audio_callback);
+	engine.open(l[choice]);
+	engine.start();
+	while(true) {}
+	engine.stop();
+	engine.close();
 	return 0;
 	
 /*	auto ret = engine.open(config);

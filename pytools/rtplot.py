@@ -33,7 +33,7 @@ def read_memory(pid, addr, length, typ):
 
 def main():
     if len(sys.argv) != 4:
-        print("Usage: python plot.py <pid> <type>:<addr>:<len> <window_size>")
+        print("Execute first : echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope,\nUsage: python plot.py <pid> <type>:<addr>:<len> <window_size>")
         sys.exit(1)
 
     pid = int(sys.argv[1])

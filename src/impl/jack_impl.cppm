@@ -13,14 +13,32 @@ export import audio.error;
 
 import audio.abstract_core;
 
-export namespace mka::audio {
-	
-	class JACK final: public AbstractCoreAudio {
+namespace mka::audio {
+
+	int processCallback(jack_nframes_t nframes, void* arg);
+
+	struct JackChannelHandle {
+		Channel			config;	
+		jack_port_t*	port	= nullptr;
+	};
+		
+	export class JACK final: public AbstractCoreAudio {
 
 	public:
 
 		JACK() {
-		    client = jack_client_open("mka_audio_client", JackNoStartServer, nullptr);
+			jack_status_t status;
+			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
+
+			if(!client) return;
+
+			jack_set_process_callback(client, processCallback, this);
+	
+			openedChannels.reserve(16);
+		}
+
+		~JACK() override {
+			close();
 		}
 
 		std::vector<Channel> getChannels() {
@@ -30,7 +48,8 @@ export namespace mka::audio {
 			if (!ports) return {};	
 
 			std::vector<Channel> channels;
-			
+			channels.reserve(16);
+
 			const auto samplerate = jack_get_sample_rate(client);
 			const auto bufferSize = jack_get_buffer_size(client);
 			
@@ -69,11 +88,66 @@ export namespace mka::audio {
 		}
 
 		Result open(const Channel& channel) override {
-		
+			if(!client || running) return mka::audio::Fail; 
+			std::string name;
+
+			if(channel.input) {
+				name = "input_" + std::to_string(inputCounter++);
+			} else {
+				name = "output_" + std::to_string(outputCounter++);
+			}
+
+			jack_port_t* port = jack_port_register(
+				client, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, 
+				channel.input ? JackPortIsInput : JackPortIsOutput, 0
+			);
+
+			if(!port) return mka::audio::Fail;
+
+			openedChannels.emplace_back(channel, port);
+			
+			int err = 0;
+			if(channel.input) {
+				err = jack_connect(client, channel.port.c_str(), jack_port_name(port));
+			} else {		
+				err = jack_connect(client, jack_port_name(port), channel.port.c_str());	
+			}
+
+			if (err != 0) {
+				jack_port_unregister(client, port);
+				openedChannels.pop_back();
+				return mka::audio::Fail;
+			}
+			
+			return mka::audio::Ok;
+		}
+
+		void start() override {
+			if(!client) return;
+			if(running) return;
+
+			if(jack_activate(client) == 0) {
+				running = true; 
+				currentSampleRate = jack_get_sample_rate(client);
+			}
+
+		}
+
+		void stop() override {
+			if (client) {
+				if (running.exchange(false)) {
+					jack_deactivate(client);
+				}
+			}		
 		}
 
 		Result close() override {
+			stop();
 			if (client) {
+				for (auto& h : openedChannels) {
+					jack_port_unregister(client, h.port);
+				}
+				openedChannels.clear();
 				jack_client_close(client);
 				client = nullptr;
 			}
@@ -84,8 +158,40 @@ export namespace mka::audio {
 		void run() override {}
 
 	private:
+
+		friend int processCallback(jack_nframes_t nframes, void* arg);
+
 		jack_client_t* client;
-		std::vector<jack_port_t*> outPorts;
+		std::vector<JackChannelHandle> openedChannels;
+		
+		size_t inputCounter = 0;
+		size_t outputCounter = 0;
+		size_t currentSampleRate = 0;
 	};
+
+	int processCallback(jack_nframes_t nframes, void* arg) {
+		auto* engine = static_cast<JACK*>(arg);
+		
+		ChannelInfo channelInfo {};
+		channelInfo.frameCount = nframes;
+		channelInfo.sampleRate = engine->currentSampleRate;
+		
+		for(auto& ch : engine->openedChannels) {
+			auto buf = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
+			if(ch.config.input) {
+				if(channelInfo.input.channelCount < MAX_CHANNEL_COUNT) {
+					channelInfo.input.data[channelInfo.input.channelCount++] = buf;
+				}
+			} else {
+				if(channelInfo.output.channelCount < MAX_CHANNEL_COUNT) {
+					channelInfo.output.data[channelInfo.output.channelCount++] = buf;
+				}
+			}
+		}
+		jack_status_t status;
+		if(engine->callback) engine->callback(channelInfo);
+		
+		return 0;
+	}
 }
 

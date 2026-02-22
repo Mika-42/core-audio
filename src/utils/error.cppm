@@ -3,7 +3,8 @@ export module audio.error;
 export namespace mka::audio {
 
 	enum class Error {
-		None, 
+		None,
+	   	GenericError,
 		DeviceOpenFailed,
 		SetupHardwareParameterFailed,
 		PollSetupFailed,
@@ -40,5 +41,6 @@ export namespace mka::audio {
 	};
 
 	inline constexpr Result Ok { Error::None, nullptr };
+	inline constexpr Result Fail { Error::GenericError, "generic error occured." };
 
 }
