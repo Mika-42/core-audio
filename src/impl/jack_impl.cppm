@@ -54,7 +54,7 @@ namespace mka::audio {
 			// setting audio engine value
 			sampleRate.store(currentSampleRate.load());
 			bufferSize.store(currentBufferSize.load());
-			state.store(EngineState::Stopped);
+			state.store(State::Stopped);
 		}
 
 		~JACK() override {
@@ -69,10 +69,7 @@ namespace mka::audio {
 
 			std::vector<Channel> channels;
 			channels.reserve(16);
-
-			const auto sampleRate = jack_get_sample_rate(client);
-			const auto bufferSize = jack_get_buffer_size(client);
-			
+	
 			for (int i = 0; ports[i]; ++i) {
 
 				jack_port_t* port = jack_port_by_name(client, ports[i]);
@@ -93,8 +90,8 @@ namespace mka::audio {
 					std::string(channel_name),
 					std::string(device_name), 
 					std::string(full_name),
-					sampleRate,
-					bufferSize,
+					currentSampleRate.load(),
+					currentBufferSize.load(),
 					mka::audio::Format::Float32,			
 					isInput
 				);
@@ -111,7 +108,7 @@ namespace mka::audio {
 			
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			if(!client) return mka::audio::Fail;
-			if(state.load() != EngineState::Stopped) return mka::audio::Fail;
+			if(state.load() != State::Stopped) return mka::audio::Fail;
 
 
 			std::string name;
@@ -153,31 +150,30 @@ namespace mka::audio {
 
 			if(state.load() != State::Stopped) return;
 
-			state.store(EngineState::Starting);
+			state.store(State::Starting);
 
 			if(jack_activate(client) == 0) {
-				state.store(EngineState::Running);
+				state.store(State::Running);
 				return;
 			}
 
-			state.store(EngineState::Stopped);
+			state.store(State::Stopped);
 		}
 
 		void stop() override {
-			if (client) {
-				if (running.exchange(false)) {
-					jack_deactivate(client);
-				}
-			}		
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+			stopNoLock();
 		}
 
 		Result close() override {
-			stop();
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+			stopNoLock();
 
 			if (client) {
 				for (auto& h : openedChannels) {
 					jack_port_unregister(client, h.port);
 				}
+				
 				openedChannels.clear();
 				jack_client_close(client);
 				client = nullptr;
@@ -188,6 +184,16 @@ namespace mka::audio {
 
 	protected:
 		void run() override {}
+
+	private:
+		
+		void stopNoLock() {
+			if (!client) return;
+			if (state.load() != State::Running) return;
+			state.store(Stopping);
+			jack_deactivate(client);
+			state.store(State::Stopped);
+		}
 
 	private:
 		friend int bufferSizeCallback(jack_nframes_t nframes, void* arg);
