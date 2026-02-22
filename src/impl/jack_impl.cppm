@@ -1,10 +1,13 @@
 module;
 
 #include <jack/jack.h>
-#include <string>
-#include <vector>
+
 #include <algorithm>
-#include <unordered_map>
+#include <atomic>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <vector>
 
 export module audio.jack;
 export import audio.block;
@@ -16,25 +19,30 @@ import audio.abstract_core;
 namespace mka::audio {
 
 	int processCallback(jack_nframes_t nframes, void* arg);
+	void shutdownCallback(void* arg);
 
 	struct JackChannelHandle {
-		Channel			config;	
-		jack_port_t*	port	= nullptr;
+		Channel			config;
+		jack_port_t*	port = nullptr;
 	};
 		
-	export class JACK final: public AbstractCoreAudio {
+	export class JACK final : public AbstractCoreAudio {
 
 	public:
 
 		JACK() {
-			jack_status_t status;
+			jack_status_t status {};
 			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
 
 			if(!client) return;
 
 			jack_set_process_callback(client, processCallback, this);
+			jack_on_shutdown(client, shutdownCallback, this);
 	
 			openedChannels.reserve(16);
+
+			currentSampleRate.store(jack_get_sample_rate(client));
+			currentBufferSize.store(jack_get_buffer_size(client));
 		}
 
 		~JACK() override {
@@ -45,12 +53,12 @@ namespace mka::audio {
 			if (!client) return {};
 		
 			const char** ports = jack_get_ports(client, nullptr, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical);
-			if (!ports) return {};	
+			if (!ports) return {};
 
 			std::vector<Channel> channels;
 			channels.reserve(16);
 
-			const auto samplerate = jack_get_sample_rate(client);
+			const auto sampleRate = jack_get_sample_rate(client);
 			const auto bufferSize = jack_get_buffer_size(client);
 			
 			for (int i = 0; ports[i]; ++i) {
@@ -73,7 +81,7 @@ namespace mka::audio {
 					std::string(channel_name),
 					std::string(device_name), 
 					std::string(full_name),
-					samplerate,
+					sampleRate,
 					bufferSize,
 					mka::audio::Format::Float32,			
 					isInput
@@ -128,7 +136,6 @@ namespace mka::audio {
 
 			if(jack_activate(client) == 0) {
 				running = true; 
-				currentSampleRate = jack_get_sample_rate(client);
 			}
 
 		}
@@ -160,38 +167,60 @@ namespace mka::audio {
 	private:
 
 		friend int processCallback(jack_nframes_t nframes, void* arg);
+		friend void shutdownCallback(void* arg);
 
 		jack_client_t* client;
 		std::vector<JackChannelHandle> openedChannels;
 		
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
-		size_t currentSampleRate = 0;
+		
+		std::atomic<uint32_t> currentSampleRate = 0;
+		std::atomic<uint32_t> currentBufferSize = 0;
 	};
+
+	void shutdownCallback(void* arg) {
+		auto* engine = static_cast<JACK*>(arg);
+		engine->running.store(false, std::memory_order_release);
+	}
 
 	int processCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		
-		ChannelInfo channelInfo {};
-		channelInfo.frameCount = nframes;
-		channelInfo.sampleRate = engine->currentSampleRate;
+		ChannelInfo info {};
+		info.frameCount = nframes;
+		info.sampleRate = engine->sampleRate.load();
 		
 		for(auto& ch : engine->openedChannels) {
 			auto buf = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
+			if(!buf) continue;
+
+			uint32_t sr = ch.config.sampleRate.value_or(engine->currentSampleRate);
+		
+			if(sr != engine->currentSampleRate) {
+				//resampling
+			}
+
 			if(ch.config.input) {
-				if(channelInfo.input.channelCount < MAX_CHANNEL_COUNT) {
-					channelInfo.input.data[channelInfo.input.channelCount++] = buf;
+				if(info.input.channelCount < MAX_CHANNEL_COUNT) {
+					info.input.data[info.input.channelCount++] = buf;
 				}
 			} else {
-				if(channelInfo.output.channelCount < MAX_CHANNEL_COUNT) {
-					channelInfo.output.data[channelInfo.output.channelCount++] = buf;
+				if(info.output.channelCount < MAX_CHANNEL_COUNT) {
+					info.output.data[info.output.channelCount++] = buf;
 				}
 			}
 		}
-		jack_status_t status;
-		if(engine->callback) engine->callback(channelInfo);
+		
+		if(engine->callback) {
+			engine->callback(info);
+		} else {
+			for (size_t ch = 0; ch < info.output.channelCount; ++ch) {
+				std::memset(info.output.data[ch], 0, sizeof(float) * nframes);
+			}
+		}
 		
 		return 0;
 	}
 }
-
+	

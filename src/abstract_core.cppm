@@ -34,11 +34,30 @@ export namespace mka::audio {
 			this->callback = callback;	
 		}
 
+		virtual void setSampleRate(uint32_t sampleRate) final {
+			this->sampleRate.store(sampleRate);
+		}
+
+		virtual uint32_t getSampleRate() final {
+			return sampleRate.load();
+		}
+
+		virtual void setBufferSize(uint32_t bufferSize) final {
+			this->bufferSize.store(bufferSize);
+		}
+
+		virtual uint32_t getBufferSize() final {
+			return bufferSize.load();
+		}
+
 	protected:
 		virtual void run() = 0;
 
-		Callback			callback = nullptr;
-		std::atomic<bool>	running	= false;
+		Callback				callback = nullptr;
+
+		std::atomic<bool>		running		= false;
+		std::atomic<uint32_t>	sampleRate	= 0;
+		std::atomic<uint32_t>	bufferSize	= 0;
 	
 	};
 }

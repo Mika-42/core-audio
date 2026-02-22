@@ -43,6 +43,8 @@ int main()
 	std::cin >> choice;
 
 	engine.setCallback(audio_callback);
+	engine.setSampleRate(48'000);
+
 	engine.open(l[choice]);
 	engine.start();
 	while(true) {}
