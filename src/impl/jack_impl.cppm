@@ -18,7 +18,7 @@ import audio.abstract_core;
 
 namespace mka::audio {
 	
-	// JACK Callbacks
+	// JACK callbacks
 	int sampleRateCallback(jack_nframes_t nframes, void* arg);
 	int bufferSizeCallback(jack_nframes_t nframes, void* arg);
 	int processCallback(jack_nframes_t nframes, void* arg);
@@ -38,22 +38,28 @@ namespace mka::audio {
 			jack_status_t status {};
 			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
 
-			if(!client) return;
+			if(!client) {
+				state.store(State::Closed);
+				return;
+			}
 
 			// setting callbacks
 			jack_on_shutdown(client, shutdownCallback, this);
-			jack_set_xrun_callback(client, xrunCallback, this);	
+			jack_set_xrun_callback(client, xrunCallback, this);
 			jack_set_process_callback(client, processCallback, this);
 			jack_set_sample_rate_callback(client, sampleRateCallback, this);
 			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
 
 			// setting JACK API value
-			currentSampleRate.store(jack_get_sample_rate(client));
-			currentBufferSize.store(jack_get_buffer_size(client));
-			
+			const uint32_t jackSampleRate = jack_get_sample_rate(client);
+			const uint32_t jackBufferSize = jack_get_buffer_size(client);
+	
 			// setting audio engine value
-			sampleRate.store(currentSampleRate.load());
-			bufferSize.store(currentBufferSize.load());
+			currentSampleRate.store(jackSampleRate);
+			currentBufferSize.store(jackBufferSize);
+			sampleRate.store(jackSampleRate);
+			bufferSize.store(jackBufferSize);
+			
 			state.store(State::Stopped);
 		}
 
@@ -75,21 +81,20 @@ namespace mka::audio {
 				jack_port_t* port = jack_port_by_name(client, ports[i]);
 				if (!port) continue;
 
-				std::string_view full_name = ports[i];
-
-				auto pos = full_name.find(':');
+				std::string_view fullName = ports[i];
+				auto pos = fullName.find(':');
 				if (pos == std::string_view::npos) continue;
 
-		        std::string_view device_name  = full_name.substr(0, pos);
-		        std::string_view channel_name = full_name.substr(pos + 1);
+		        std::string_view deviceName  = fullName.substr(0, pos);
+		        std::string_view channelName = fullName.substr(pos + 1);
 
 				unsigned long flags = jack_port_flags(port);
 				const bool isInput = (flags & JackPortIsOutput);
 
 				channels.emplace_back(
-					std::string(channel_name),
-					std::string(device_name), 
-					std::string(full_name),
+					std::string(channelName),
+					std::string(deviceName), 
+					std::string(fullName),
 					currentSampleRate.load(),
 					currentBufferSize.load(),
 					mka::audio::Format::Float32,			
@@ -107,38 +112,40 @@ namespace mka::audio {
 		Result open(const Channel& channel) override {
 			
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
-			if(!client) return mka::audio::Fail;
-			if(state.load() != State::Stopped) return mka::audio::Fail;
-
-
-			std::string name;
-
-			if(channel.input) {
-				name = "input_" + std::to_string(inputCounter++);
-			} else {
-				name = "output_" + std::to_string(outputCounter++);
+			if(!client) {
+				return Result { Error::DeviceOpenFailed, "JACK client unavailable." };
 			}
+			
+			if(state.load() != State::Stopped) {
+				return Result { Error::WouldBlock, "Engine must be stopped before opening a channel." };
+			}
+
+			if (openedChannels.size() >= MAX_CHANNEL_COUNT) {
+				return Result { Error::GenericError, "Maximum channel count reached." };
+			}
+
+			std::string name = channel.input ? "input_" : "output_";
+			name += std::to_string(channel.input ? inputCounter++ : outputCounter++);
 
 			jack_port_t* port = jack_port_register(
 				client, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, 
 				channel.input ? JackPortIsInput : JackPortIsOutput, 0
 			);
 
-			if(!port) return mka::audio::Fail;
+			if(!port) {
+				return Result { Error::DeviceOpenFailed, "Failed to register JACK port." };
+			}
 
 			openedChannels.emplace_back(channel, port);
 			
-			int err = 0;
-			if(channel.input) {
-				err = jack_connect(client, channel.port.c_str(), jack_port_name(port));
-			} else {		
-				err = jack_connect(client, jack_port_name(port), channel.port.c_str());	
-			}
-
+			int err = (channel.input) 
+				? jack_connect(client, channel.port.c_str(), jack_port_name(port))
+				: jack_connect(client, jack_port_name(port), channel.port.c_str());	
+			
 			if (err != 0) {
 				jack_port_unregister(client, port);
 				openedChannels.pop_back();
-				return mka::audio::Fail;
+				return Result { Error::DeviceOpenFailed, "Failed to connect JACK port." };
 			}
 			
 			return mka::audio::Ok;
@@ -190,7 +197,7 @@ namespace mka::audio {
 		void stopNoLock() {
 			if (!client) return;
 			if (state.load() != State::Running) return;
-			state.store(Stopping);
+			state.store(State::Stopping);
 			jack_deactivate(client);
 			state.store(State::Stopped);
 		}
@@ -227,7 +234,7 @@ namespace mka::audio {
 
 	void shutdownCallback(void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
-		engine->running.store(false);
+		engine->state.store(State::Stopped);
 	}
 
 	int xrunCallback(void* arg) {
@@ -244,7 +251,7 @@ namespace mka::audio {
 		info.sampleRate = engine->sampleRate.load();
 		
 		for(auto& ch : engine->openedChannels) {
-			auto buf = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
+			auto* buf = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
 			if(!buf) continue;
 
 			uint32_t sr = ch.config.sampleRate.value_or(engine->currentSampleRate);
