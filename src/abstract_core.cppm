@@ -12,6 +12,8 @@ import audio.config;
 
 export namespace mka::audio {
 
+	enum class State : uint8_t { Stopped, Starting, Running, Stopping, Closed };
+
 	/*
 	 * ! callback must be set before start() !
 	 */
@@ -55,7 +57,7 @@ export namespace mka::audio {
 
 		Callback				callback = nullptr;
 
-		std::atomic<bool>		running		= false;
+		std::atomic<State>		state		= State::Closed;
 		std::atomic<uint32_t>	sampleRate	= 0;
 		std::atomic<uint32_t>	bufferSize	= 0;
 	
