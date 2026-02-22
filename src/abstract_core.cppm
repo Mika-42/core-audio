@@ -1,5 +1,6 @@
 module;
 
+#include <mutex>
 #include <memory>
 #include <string>
 #include <atomic>
@@ -56,7 +57,8 @@ export namespace mka::audio {
 		virtual void run() = 0;
 
 		Callback				callback = nullptr;
-
+		
+		std::mutex				lifecycleMutex;
 		std::atomic<State>		state		= State::Closed;
 		std::atomic<uint32_t>	sampleRate	= 0;
 		std::atomic<uint32_t>	bufferSize	= 0;
