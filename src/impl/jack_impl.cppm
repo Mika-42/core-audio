@@ -51,14 +51,14 @@ namespace mka::audio {
 			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
 
 			// setting JACK API value
-			const uint32_t jackSampleRate = jack_get_sample_rate(client);
-			const uint32_t jackBufferSize = jack_get_buffer_size(client);
+			const uint32_t _jackSampleRate = jack_get_sample_rate(client);
+			const uint32_t _jackBufferSize = jack_get_buffer_size(client);
 	
 			// setting audio engine value
-			currentSampleRate.store(jackSampleRate);
-			currentBufferSize.store(jackBufferSize);
-			sampleRate.store(jackSampleRate);
-			bufferSize.store(jackBufferSize);
+			jackSampleRate.store(_jackSampleRate);
+			jackBufferSize.store(_jackBufferSize);
+			sampleRate.store(_jackSampleRate);
+			blockSize.store(_jackBufferSize);
 			
 			state.store(State::Stopped);
 		}
@@ -95,8 +95,8 @@ namespace mka::audio {
 					std::string(channelName),
 					std::string(deviceName), 
 					std::string(fullName),
-					currentSampleRate.load(),
-					currentBufferSize.load(),
+					jackSampleRate.load(),
+					jackBufferSize.load(),
 					mka::audio::Format::Float32,			
 					isInput
 				);
@@ -128,8 +128,11 @@ namespace mka::audio {
 			name += std::to_string(channel.input ? inputCounter++ : outputCounter++);
 
 			jack_port_t* port = jack_port_register(
-				client, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, 
-				channel.input ? JackPortIsInput : JackPortIsOutput, 0
+				client, 
+				name.c_str(), 
+				JACK_DEFAULT_AUDIO_TYPE, 
+				channel.input ? JackPortIsInput : JackPortIsOutput,
+				0
 			);
 
 			if(!port) {
@@ -138,7 +141,7 @@ namespace mka::audio {
 
 			openedChannels.emplace_back(channel, port);
 			
-			int err = (channel.input) 
+			const int err = (channel.input) 
 				? jack_connect(client, channel.port.c_str(), jack_port_name(port))
 				: jack_connect(client, jack_port_name(port), channel.port.c_str());	
 			
@@ -153,13 +156,11 @@ namespace mka::audio {
 
 		void start() override {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
-			if(!client) return;
-
-			if(state.load() != State::Stopped) return;
+			if (!client || state.load() != State::Stopped) return;
 
 			state.store(State::Starting);
 
-			if(jack_activate(client) == 0) {
+			if (jack_activate(client) == 0) {
 				state.store(State::Running);
 				return;
 			}
@@ -195,8 +196,7 @@ namespace mka::audio {
 	private:
 		
 		void stopNoLock() {
-			if (!client) return;
-			if (state.load() != State::Running) return;
+			if (!client || state.load() != State::Running) return;
 			state.store(State::Stopping);
 			jack_deactivate(client);
 			state.store(State::Stopped);
@@ -215,20 +215,20 @@ namespace mka::audio {
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
 
-		std::atomic<uint32_t> currentSampleRate = 0;
-		std::atomic<uint32_t> currentBufferSize = 0;
-		std::atomic<uint32_t> xrunCount			= 0;
+		std::atomic<uint32_t> jackSampleRate = 0;
+		std::atomic<uint32_t> jackBufferSize = 0;
+		std::atomic<uint32_t> xrunCount		 = 0;
 	};
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
-		engine->currentSampleRate.store(nframes);
+		engine->jackSampleRate.store(nframes);
 		return 0;
 	}
 
 	int bufferSizeCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
-		engine->currentBufferSize.store(nframes);
+		engine->jackBufferSize.store(nframes);
 		return 0;
 	}
 
@@ -245,7 +245,13 @@ namespace mka::audio {
 
 	int processCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
+	
+		const uint32_t jackRate		= engine->jackSampleRate.load();
+		const uint32_t engineRate	= engine->sampleRate.load();
+		const uint32_t blockSize	= engine->blockSize.load();
+		const bool needResamle		= (jackRate != engineRate);
 		
+		//----
 		ChannelInfo info {};
 		info.frameCount = nframes;
 		info.sampleRate = engine->sampleRate.load();
@@ -254,9 +260,9 @@ namespace mka::audio {
 			auto* buf = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
 			if(!buf) continue;
 
-			uint32_t sr = ch.config.sampleRate.value_or(engine->currentSampleRate);
+			uint32_t sr = ch.config.sampleRate.value_or(jackRate);
 		
-			if(sr != engine->currentSampleRate.load()) {
+			if(sr != jackRate) {
 				//resampling
 			}
 

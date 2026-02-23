@@ -13,7 +13,7 @@ void audio_callback(const mka::audio::ChannelInfo& info) {
 		phase += 2.0f * M_PI * 440.00f / info.sampleRate;
 
 		for(uint32_t ch = 0; ch < info.output.channelCount; ++ch) {
-			info.output.data[ch][i] = sample;
+			info.output[ch][i] = sample;
 		}
 	}
 }

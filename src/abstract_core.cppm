@@ -45,12 +45,12 @@ export namespace mka::audio {
 			return sampleRate.load();
 		}
 
-		virtual void setBufferSize(uint32_t bufferSize) final {
-			this->bufferSize.store(bufferSize);
+		virtual void setBlockSize(uint32_t blockSize) final {
+			this->blockSize.store(blockSize);
 		}
 
-		virtual uint32_t getBufferSize() final {
-			return bufferSize.load();
+		virtual uint32_t getBlockSize() final {
+			return blockSize.load();
 		}
 
 	protected:
@@ -61,7 +61,7 @@ export namespace mka::audio {
 		std::mutex				lifecycleMutex;
 		std::atomic<State>		state		= State::Closed;
 		std::atomic<uint32_t>	sampleRate	= 0;
-		std::atomic<uint32_t>	bufferSize	= 0;
+		std::atomic<uint32_t>	blockSize	= 0;
 	
 	};
 }

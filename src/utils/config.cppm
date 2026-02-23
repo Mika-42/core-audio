@@ -15,7 +15,7 @@ export namespace mka::audio {
 		};
 
 		inline constexpr uint32_t bufferSizes[] {
-			16, 32, 64, 128, 256, 512, 1'024, 2'048, 4'096, 8'192
+			64, 128, 256, 512, 1'024, 2'048, 4'096, 8'192
 		};
 	}
 
