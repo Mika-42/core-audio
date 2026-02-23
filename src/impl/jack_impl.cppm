@@ -87,8 +87,7 @@ namespace mka::audio {
 
 		        std::string_view deviceName  = fullName.substr(0, pos);
 		        std::string_view channelName = fullName.substr(pos + 1);
-
-				unsigned long flags = jack_port_flags(port);
+				const unsigned long flags = jack_port_flags(port);
 				const bool isInput = (flags & JackPortIsOutput);
 
 				channels.emplace_back(
@@ -141,7 +140,7 @@ namespace mka::audio {
 
 			openedChannels.emplace_back(channel, port);
 			
-			const int err = (channel.input) 
+			const int err = channel.input 
 				? jack_connect(client, channel.port.c_str(), jack_port_name(port))
 				: jack_connect(client, jack_port_name(port), channel.port.c_str());	
 			
@@ -217,7 +216,8 @@ namespace mka::audio {
 
 		std::atomic<uint32_t> jackSampleRate = 0;
 		std::atomic<uint32_t> jackBufferSize = 0;
-		std::atomic<uint32_t> xrunCount		 = 0;
+		std::atomic<uint64_t> xrunCount		 = 0;
+		std::atomic<uint64_t> underrunCount	 = 0;
 	};
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
@@ -250,33 +250,38 @@ namespace mka::audio {
 		const uint32_t engineRate	= engine->sampleRate.load();
 		const uint32_t blockSize	= engine->blockSize.load();
 		const bool needResamle		= (jackRate != engineRate);
-		
+	
+		if(jackRate == 0 || engineRate == 0) return 0;
+
 		//----
-		ChannelInfo info {};
+		Block block {};
 		info.frameCount = nframes;
 		info.sampleRate = engine->sampleRate.load();
-		
-		for(auto& ch : engine->openedChannels) {
-			auto* buf = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
+		auto& ch = engine->openedChannels;
+
+		for(size_t c = 0; c < ch.size(); ++c) {
+			float* buf = static_cast<float*>(jack_port_get_buffer(ch[c].port, nframes));
 			if(!buf) continue;
-
-			uint32_t sr = ch.config.sampleRate.value_or(jackRate);
-		
-			if(sr != jackRate) {
-				//resampling
+			
+			if(block.inputCount + block.outputCount >= MAX_CHANNEL_COUNT) {
+				// fail : too many channels
+				return;
 			}
 
-			if(ch.config.input) {
-				if(info.input.channelCount < MAX_CHANNEL_COUNT) {
-					info.input.data[info.input.channelCount++] = buf;
-				}
+			if(engine->openedChannels.config.input) {
+					block.inputs[block.inputCount++] = buf;
 			} else {
-				if(info.output.channelCount < MAX_CHANNEL_COUNT) {
-					info.output.data[info.output.channelCount++] = buf;
-				}
+					block.outputs[block.outputCount++] = buf;
 			}
+		
 		}
 		
+		uint32_t sr = ch.config.sampleRate.value_or(jackRate);
+
+			if(sr != jackRate) {
+				//in resampling
+			}
+
 		if(engine->callback) {
 			engine->callback(info);
 		} else {
@@ -285,6 +290,9 @@ namespace mka::audio {
 			}
 		}
 		
+		if(sr != jackRate) {
+				//out resampling
+		}
 		return 0;
 	}
 }

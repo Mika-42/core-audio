@@ -7,26 +7,17 @@ export module audio.block;
 
 export namespace mka::audio {
 	
-//	constexpr size_t MAX_CHANNEL_COUNT = 64;
+	constexpr size_t MAX_CHANNEL_COUNT	= 16;	//2^4
+	constexpr size_t MAX_FRAMES_COUNT	= 4096;	//2^12
 
 	struct Block {	
-		float**	data = nullptr;
-		uint32_t channelCount = 0;
-		uint32_t frameCount = 0;
-
-		float* operator[](uint32_t ch) const {
-			return data[ch];
-		}
-//		float*	data[MAX_CHANNEL_COUNT] = {};
-	};
-
-	struct ChannelInfo {
-		uint32_t	sampleRate = 0;
 		uint32_t	blockSize = 0;
-	
-		Block		input;	
-		Block		output;	
+		uint32_t	sampleRate = 0;
+		uint32_t	inputCount = 0;	
+		uint32_t	outputCount = 0;	
+		float		inputs[MAX_CHANNEL_COUNT][MAX_FRAMES_COUNT];
+		float		outputs[MAX_CHANNEL_COUNT][MAX_FRAMES_COUNT];
 	};
 
-	typedef void(*Callback)(const ChannelInfo&);
+	typedef void(*Callback)(Block&);
 }
