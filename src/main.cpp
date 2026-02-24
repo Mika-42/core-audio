@@ -28,9 +28,7 @@ void printChannels(const std::vector<mka::audio::ChannelInfo>& channels) {
     }
 }
 
-int main() 
-{
-
+int main() {
 	mka::audio::JACK engine;
 	
 	auto l = engine.getChannels();
