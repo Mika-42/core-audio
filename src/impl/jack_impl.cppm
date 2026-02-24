@@ -8,6 +8,7 @@ module;
 #include <string>
 #include <string_view>
 #include <vector>
+#include <memory>
 
 export module audio.jack;
 export import audio.block;
@@ -35,6 +36,9 @@ namespace mka::audio {
 	public:
 
 		JACK() {
+
+			openedChannels = std::make_unique<JackChannelHandle[]>(constants::MAX_CHANNEL_COUNT);
+
 			jack_status_t status {};
 			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
 
@@ -145,7 +149,7 @@ namespace mka::audio {
 				return Result { Error::DeviceOpenFailed, "Failed to register JACK port." };
 			}
 
-			JackChannelHandle &handle = openedChannels[channelCount++];
+			JackChannelHandle &handle = openedChannels[chanCount];
 
 			std::strncpy(handle.channel.channelInfo.name, channel.name, sizeof(handle.channel.channelInfo.name) - 1);
 			handle.channel.channelInfo.name[sizeof(handle.channel.channelInfo.name) - 1] = '\0';
@@ -163,10 +167,11 @@ namespace mka::audio {
 			
 			if (err != 0) {
 				jack_port_unregister(client, port);
-				--channelCount;
 
 				return Result { Error::DeviceOpenFailed, "Failed to connect JACK port." };
 			}
+
+			channelCount.store(chanCount + 1, std::memory_order_release);			
 			
 			return mka::audio::Ok;
 		}
@@ -195,8 +200,13 @@ namespace mka::audio {
 			stopNoLock();
 
 			if (client) {
-				for (auto& ch : openedChannels) {
+				const size_t count = channelCount.load(std::memory_order_acquire);
+	
+				for (size_t i = 0; i < count; ++i) {
+					auto& ch = openedChannels[i];
+					if (!ch.port) continue;
 					jack_port_unregister(client, ch.port);
+					ch.port = nullptr;
 				}
 				
 				channelCount.store(0);
@@ -228,7 +238,7 @@ namespace mka::audio {
 		friend void shutdownCallback(void* arg);
 
 		jack_client_t* client = nullptr;
-		JackChannelHandle openedChannels[constants::MAX_CHANNEL_COUNT];
+		std::unique_ptr<JackChannelHandle[]> openedChannels;
 			
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
@@ -265,14 +275,17 @@ namespace mka::audio {
 
 	int processCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
-	
+		if (!engine->callback) return 0;	
+		
 		Block block {};
 		block.blockSize = engine->blockSize.load();
 		block.sampleRate = engine->sampleRate.load();
-		const size_t channelCount = engine->channelCount.load();
-
+		const size_t channelCount = engine->channelCount.load(std::memory_order_acquire);
+		size_t inputCount = 0;
+		size_t outputCount = 0;
+		size_t processIt = 1;
 		size_t i = 0;
-
+	
 		// copy inputs in fifo
 		for (i = 0; i < channelCount; ++i) {
 	        auto& ch = engine->openedChannels[i];
@@ -286,21 +299,30 @@ namespace mka::audio {
 
 			if (ch.channel.channelInfo.direction == Direction::In) {
 				ch.channel.fifo.push(ch.channel.scratchBuffer, copyCount);
+				inputCount++;
+			} else if(ch.channel.channelInfo.direction == Direction::Out) {
+				outputCount++;
 			}
 		}
 
-		for(;;) {
-			bool enoughData = true;
+		block.inputCount = static_cast<uint32_t>(inputCount);
+		block.outputCount = static_cast<uint32_t>(outputCount);
+
+		if(inputCount > 0) {
+			processIt = constants::MAX_ITERATION;
 			
-			// allow process only fullfilled inputs
 			for (i = 0; i < channelCount; ++i) {
 				auto& ch = engine->openedChannels[i];
-				if (ch.channel.channelInfo.direction == Direction::In && ch.channel.fifo.available() < engine->blockSize) {
-	                enoughData = false;
-		            break;
-			    }
+				if (ch.channel.channelInfo.direction == Direction::In) {
+				   	const size_t availableBlocks = ch.channel.fifo.available() / block.blockSize;
+					if (availableBlocks < processIt) {
+						processIt = availableBlocks;
+					}
+				}
 			}
-			if (!enoughData) break;
+		}		
+
+		for(size_t _ = 0; _ < processIt; ++_) {
 
 			// pop inputs in block
 			for (i = 0; i < channelCount; ++i) {

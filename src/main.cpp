@@ -42,7 +42,9 @@ int main() {
 
 	engine.open(l[choice]);
 	engine.start();
-	while(true) {}
+	
+	std::cout << "press any key to exit.";
+	std::cin >> choice;
 	engine.stop();
 	engine.close();
 	return 0;
