@@ -12,8 +12,8 @@ export namespace mka::audio {
 		uint32_t	sampleRate = 0;
 		uint32_t	inputCount = 0;	
 		uint32_t	outputCount = 0;	
-		float		inputs [constants::MAX_CHANNEL_COUNT][constants::MAX_BLOCK_SIZE];
-		float		outputs[constants::MAX_CHANNEL_COUNT][constants::MAX_BLOCK_SIZE];
+		float*		inputs [constants::MAX_CHANNEL_COUNT] {};
+		float*		outputs[constants::MAX_CHANNEL_COUNT] {};
 	};
 
 	typedef void(*Callback)(Block&);

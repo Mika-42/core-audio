@@ -38,6 +38,8 @@ namespace mka::audio {
 		JACK() {
 
 			openedChannels = std::make_unique<JackChannelHandle[]>(constants::MAX_CHANNEL_COUNT);
+			inputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
+			outputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
 
 			jack_status_t status {};
 			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
@@ -173,6 +175,13 @@ namespace mka::audio {
 
 			channelCount.store(chanCount + 1, std::memory_order_release);			
 			
+			if(channel.direction == Direction::In) {
+				inputCount++;
+			}
+			else if(channel.direction == Direction::Out) {
+				outputCount++;
+			}
+			
 			return mka::audio::Ok;
 		}
 
@@ -210,6 +219,8 @@ namespace mka::audio {
 				}
 				
 				channelCount.store(0);
+				inputCount.store(0);
+				outputCount.store(0);
 
 				jack_client_close(client);
 				client = nullptr;
@@ -239,11 +250,16 @@ namespace mka::audio {
 
 		jack_client_t* client = nullptr;
 		std::unique_ptr<JackChannelHandle[]> openedChannels;
-			
+		std::unique_ptr<float[]> inputBlockStorage;
+		std::unique_ptr<float[]> outputBlockStorage;
+
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
 		
 		std::atomic<size_t>	  channelCount	 = 0;
+		std::atomic<size_t>	  inputCount	 = 0;
+		std::atomic<size_t>	  outputCount	 = 0;
+
 		std::atomic<uint32_t> jackSampleRate = 0;
 		std::atomic<uint32_t> jackBufferSize = 0;
 		std::atomic<uint64_t> xrunCount		 = 0;
@@ -277,14 +293,27 @@ namespace mka::audio {
 		auto* engine = static_cast<JACK*>(arg);
 		if (!engine->callback) return 0;	
 		
+		size_t processIt = 1;
+		size_t i = 0;
+		
 		Block block {};
 		block.blockSize = engine->blockSize.load();
 		block.sampleRate = engine->sampleRate.load();
-		const size_t channelCount = engine->channelCount.load(std::memory_order_acquire);
-		size_t inputCount = 0;
-		size_t outputCount = 0;
-		size_t processIt = 1;
-		size_t i = 0;
+
+		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
+		const size_t inputCount		= engine->inputCount.load(std::memory_order_acquire);
+		const size_t outputCount	= engine->outputCount.load(std::memory_order_acquire);
+		
+		block.inputCount = static_cast<uint32_t>(inputCount);
+		block.outputCount = static_cast<uint32_t>(outputCount);
+		
+		for (i = 0; i < inputCount; ++i) {
+			block.inputs[i] = engine->inputBlockStorage.get() + (i * constants::MAX_BLOCK_SIZE);
+		}
+
+		for (i = 0; i < outputCount; ++i) {
+			block.outputs[i] = engine->outputBlockStorage.get() + (i * constants::MAX_BLOCK_SIZE);
+		}
 	
 		// copy inputs in fifo
 		for (i = 0; i < channelCount; ++i) {
@@ -299,14 +328,8 @@ namespace mka::audio {
 
 			if (ch.channel.channelInfo.direction == Direction::In) {
 				ch.channel.fifo.push(ch.channel.scratchBuffer, copyCount);
-				inputCount++;
-			} else if(ch.channel.channelInfo.direction == Direction::Out) {
-				outputCount++;
 			}
 		}
-
-		block.inputCount = static_cast<uint32_t>(inputCount);
-		block.outputCount = static_cast<uint32_t>(outputCount);
 
 		if(inputCount > 0) {
 			processIt = constants::MAX_ITERATION;
@@ -330,6 +353,11 @@ namespace mka::audio {
 				if (ch.channel.channelInfo.direction == Direction::In) {
 					ch.channel.fifo.pop(block.inputs[i], engine->blockSize);
 				}
+			}
+		
+			// zero the output	
+			for (i = 0; i < outputCount; ++i) {
+				std::memset(block.outputs[i], 0, sizeof(float) * engine->blockSize);
 			}
 
 			engine->callback(block);
