@@ -294,11 +294,14 @@ namespace mka::audio {
 		if (!engine->callback) return 0;	
 		if (nframes > constants::MAX_BLOCK_SIZE) return 0;
 
+		const uint32_t fixedBlockSize = engine->blockSize.load(std::memory_order_acquire);
+		if (fixedBlockSize == 0 || fixedBlockSize > constants::MAX_BLOCK_SIZE) return 0;
+		
 		size_t processIt = 1;
 		size_t i = 0;
 		
 		Block block {};
-		block.blockSize = engine->blockSize.load(std::memory_order_acquire);
+		block.blockSize = fixedBlockSize;
 		block.sampleRate = engine->sampleRate.load(std::memory_order_acquire);
 
 		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
@@ -338,7 +341,7 @@ namespace mka::audio {
 			for (i = 0; i < channelCount; ++i) {
 				auto& ch = engine->openedChannels[i];
 				if (ch.channel.channelInfo.direction == Direction::In) {
-				   	const size_t availableBlocks = ch.channel.fifo.available() / block.blockSize;
+				   	const size_t availableBlocks = ch.channel.fifo.available() / fixedBlockSize;
 					if (availableBlocks < processIt) {
 						processIt = availableBlocks;
 					}
@@ -352,13 +355,13 @@ namespace mka::audio {
 			for (i = 0; i < channelCount; ++i) {
 				auto& ch = engine->openedChannels[i];
 				if (ch.channel.channelInfo.direction == Direction::In) {
-					ch.channel.fifo.pop(block.inputs[i], engine->blockSize);
+					ch.channel.fifo.pop(block.inputs[i], fixedBlockSize);
 				}
 			}
 		
 			// zero the output	
 			for (i = 0; i < outputCount; ++i) {
-				std::memset(block.outputs[i], 0, sizeof(float) * engine->blockSize);
+				std::memset(block.outputs[i], 0, sizeof(float) * fixedBlockSize);
 			}
 
 			engine->callback(block);
@@ -367,7 +370,7 @@ namespace mka::audio {
 			for (i = 0; i < channelCount; ++i) {
 				auto& ch = engine->openedChannels[i];
 				if (ch.channel.channelInfo.direction == Direction::Out) {
-					ch.channel.fifo.push(block.outputs[i], engine->blockSize);
+					ch.channel.fifo.push(block.outputs[i], fixedBlockSize);
 				}
 			}
 		}
