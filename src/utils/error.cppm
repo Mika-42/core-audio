@@ -12,8 +12,7 @@ export namespace mka::audio {
 		PollDescriptorsFailed,
 		XRun,
 		WouldBlock,
-		MMapBeginFailed,
-		MMapCommitFailed
+		AlreadyExists,
 	};
 
 	struct Result {

@@ -4,33 +4,30 @@
 
 import audio.jack;
 
-void audio_callback(const mka::audio::ChannelInfo& info) {
+void audio_callback(mka::audio::Block& block) {
 	static float phase = {};
 
-	for(uint32_t i = 0; i < info.frameCount; ++i) {
+	for(uint32_t i = 0; i < block.blockSize; ++i) {
 		float sample = sinf(phase);
 
-		phase += 2.0f * M_PI * 440.00f / info.sampleRate;
+		phase += 2.0f * M_PI * 440.00f / block.sampleRate;
 
-		for(uint32_t ch = 0; ch < info.output.channelCount; ++ch) {
-			info.output[ch][i] = sample;
+		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
+			block.outputs[ch][i] = sample;
 		}
 	}
 }
 
-void printChannels(const std::vector<mka::audio::Channel>& channels) {
+void printChannels(const std::vector<mka::audio::ChannelInfo>& channels) {
     for (auto& ch : channels) {
 		
 		std::println("{{");
-		std::println("\tdevice name:\t{},", ch.deviceName);
-		std::println("\tname:\t\t{},", ch.name);
-		std::println("\tport:\t\t{},", ch.port);
-		std::println("\tsamplerate:\t{},", *ch.sampleRate);
-		std::println("\tbuffer size:\t{},", *ch.bufferSize);
-		std::println("\tis input:\t{}", ch.input);
+		std::println("\tchannel name:\t\t{},", ch.name);
+		std::println("\tdirection:\t{}", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
 		std::println("}}\n");
     }
 }
+
 int main() 
 {
 

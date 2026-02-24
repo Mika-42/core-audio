@@ -24,9 +24,9 @@ export namespace mka::audio {
 	public:
 		virtual ~AbstractCoreAudio() {}
 
-		virtual std::vector<Channel> getChannels() = 0;
+		virtual std::vector<ChannelInfo> getChannels() = 0;
 	
-		virtual Result open(const Channel& channel) = 0;	
+		virtual Result open(const ChannelInfo channel) = 0;	
 		virtual	Result close() = 0;
 
 		virtual void start() = 0;

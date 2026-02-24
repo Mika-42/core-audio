@@ -82,5 +82,5 @@ namespace mka::audio {
 			alignas(64) T buffer[N];
 			alignas(64) std::atomic<size_t> rIndex {0};
 			alignas(64) std::atomic<size_t> wIndex {0};
-	}
+	};
 }

@@ -3,9 +3,9 @@ module;
 #include <string>
 #include <cstdint>
 #include <vector>
-#include <optional>
 
 export module audio.config;
+import audio.ring;
 
 export namespace mka::audio {
 	
@@ -19,25 +19,25 @@ export namespace mka::audio {
 		};
 	}
 
-	enum class Format {
+	enum class Format { Int16, Int24, Int32, Float32, Float64 };
 
-		Int16,
-		Int24,
-		Int32,
-		Float32,
-		Float64,
+	enum class Direction { In, Out };
 
+	struct ChannelInfo {	
+		char name[256];
+		Direction direction;
+	};
+
+	struct DeviceInfo {	
+		uint32_t sampleRate;
+	    uint32_t bufferSize;
+	    Format format;
 	};
 
 	struct Channel {
-		std::string	name;
-		std::string	deviceName;
-		std::string	port;
-
-		std::optional<uint32_t> sampleRate;
-	    std::optional<uint32_t> bufferSize;
-	    std::optional<Format> format;
-
-		bool input;
+		DeviceInfo deviceInfo {};
+		ChannelInfo channelInfo {};
+		RingBuffer<float, constants::MAX_FIFO_SIZE> fifo {};
+		float scratchBuffer[constants::MAX_BLOCK_SIZE];
 	};
 }
