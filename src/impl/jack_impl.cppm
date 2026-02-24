@@ -292,13 +292,14 @@ namespace mka::audio {
 	int processCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		if (!engine->callback) return 0;	
-		
+		if (nframes > constants::MAX_BLOCK_SIZE) return 0;
+
 		size_t processIt = 1;
 		size_t i = 0;
 		
 		Block block {};
-		block.blockSize = engine->blockSize.load();
-		block.sampleRate = engine->sampleRate.load();
+		block.blockSize = engine->blockSize.load(std::memory_order_acquire);
+		block.sampleRate = engine->sampleRate.load(std::memory_order_acquire);
 
 		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
 		const size_t inputCount		= engine->inputCount.load(std::memory_order_acquire);

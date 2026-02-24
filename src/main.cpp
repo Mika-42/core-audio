@@ -6,11 +6,17 @@ import audio.jack;
 
 void audio_callback(mka::audio::Block& block) {
 	static float phase = {};
+	constexpr float twoPi = 2.0f * static_cast<float>(M_PI);
+	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
 
 	for(uint32_t i = 0; i < block.blockSize; ++i) {
 		float sample = sinf(phase);
 
-		phase += 2.0f * M_PI * 440.00f / block.sampleRate;
+		phase += phaseIncrement;
+		if (phase >= twoPi) {
+			// Keep the phase bounded to avoid long-running precision loss (pitch drift/jitter).
+			phase -= twoPi;
+		}
 
 		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
 			block.outputs[ch][i] = sample;
@@ -48,24 +54,5 @@ int main() {
 	engine.stop();
 	engine.close();
 	return 0;
-	
-/*	auto ret = engine.open(config);
-	if(!ret.ok()) {
-		std::println("error::{}", ret.message);
-		return 1;
-	}
-	engine.setCallback(audio_callback);
-	engine.start();
-	
-	std::println("Press Enter to stop audio...\n");
-	std::cin.get();
-	
-	engine.stop();
-
-	ret = engine.close();
-	if(!ret.ok()) std::println("error::{}", ret.message);
-
-	return 0;
-	*/
 }
 
