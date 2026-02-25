@@ -1,4 +1,4 @@
-## Minimal code exemple
+## Minimal code example
 C++ version : 26
 
 ### 1. import the audio core
@@ -82,7 +82,7 @@ graph LR
 
 ### 5. Full code
 
-simple_tone_generator exemple : 
+simple_tone_generator example : 
 
 ```cpp
 #include <print>
