@@ -269,12 +269,18 @@ namespace mka::audio {
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->jackSampleRate.store(nframes);
+		engine->sampleRate.store(nframes);
 		return 0;
 	}
 
 	int bufferSizeCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->jackBufferSize.store(nframes);
+
+		// JACK is the clock master: keep the processing block size aligned with
+		// the backend period to avoid long-term drift between produced and consumed
+		// samples (audible as buzz/glitches after some time).
+		engine->blockSize.store(nframes);
 		return 0;
 	}
 
@@ -299,7 +305,6 @@ namespace mka::audio {
 			return 0;
 		}
 
-		size_t processIt = 1;
 		size_t i = 0;
 		
 		Block block {};
@@ -364,19 +369,53 @@ namespace mka::audio {
 			
 		}
 
-		if(inputCount > 0) {
-			processIt = constants::MAX_ITERATION;
-			
-			for (i = 0; i < inputCount; ++i) {
-				auto* ch = inputChannels[i];
-				if(!ch) continue;
+		// Produce callback blocks only until each output has enough data for the
+		// current JACK period. This prevents unbounded FIFO growth when callback
+		// block size differs from JACK nframes.
+		size_t processIt = 0;
+		if (outputCount == 0) {
+			// Input-only mode: process at most what is currently available.
+			processIt = (inputCount == 0) ? 1 : constants::MAX_ITERATION;
+			if (inputCount > 0) {
+				for (i = 0; i < inputCount; ++i) {
+					auto* ch = inputChannels[i];
+					if(!ch) continue;
 
-				const size_t availableBlocks = ch->channel.fifo.available() / fixedBlockSize;
-				if (availableBlocks < processIt) {
-					processIt = availableBlocks;
-				}	
+					const size_t availableBlocks = ch->channel.fifo.available() / fixedBlockSize;
+					if (availableBlocks < processIt) {
+						processIt = availableBlocks;
+					}
+				}
 			}
-		}		
+		} else {
+			while (processIt < constants::MAX_ITERATION) {
+				size_t minOutputAvailable = constants::MAX_FIFO_SIZE;
+				for (i = 0; i < outputCount; ++i) {
+					auto* ch = outputChannels[i];
+					if (!ch) continue;
+					minOutputAvailable = std::min(minOutputAvailable, ch->channel.fifo.available());
+				}
+
+				if (minOutputAvailable >= nframes) {
+					break;
+				}
+
+				if (inputCount > 0) {
+					size_t minInputAvailable = constants::MAX_FIFO_SIZE;
+					for (i = 0; i < inputCount; ++i) {
+						auto* ch = inputChannels[i];
+						if(!ch) continue;
+						minInputAvailable = std::min(minInputAvailable, ch->channel.fifo.available());
+					}
+
+					if (minInputAvailable < fixedBlockSize) {
+						break;
+					}
+				}
+
+				++processIt;
+			}
+		}
 
 		for(size_t _ = 0; _ < processIt; ++_) {
 
