@@ -269,18 +269,12 @@ namespace mka::audio {
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->jackSampleRate.store(nframes);
-		engine->sampleRate.store(nframes);
 		return 0;
 	}
 
 	int bufferSizeCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->jackBufferSize.store(nframes);
-
-		// JACK is the clock master: keep the processing block size aligned with
-		// the backend period to avoid long-term drift between produced and consumed
-		// samples (audible as buzz/glitches after some time).
-		engine->blockSize.store(nframes);
 		return 0;
 	}
 
@@ -427,7 +421,7 @@ namespace mka::audio {
 
 			engine->callback(block);
 
-		   // push outputs dans FIFO des channels output
+		   // push outputs in FIFOs channels output
 			for (i = 0; i < outputCount; ++i) {
 				auto* ch = outputChannels[i];
 				if (!ch) continue;
