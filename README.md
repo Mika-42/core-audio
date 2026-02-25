@@ -9,7 +9,7 @@ import audio.<type>;
 
 | type      | alsa  | jack  | pipewire | pulseaudio | wasapi  | asio    | ds      | wmme    | coreaudio |
 |-----------|-------|-------|----------|------------|---------|---------|---------|---------|-----------|
-| supported | no    | no    | yes      | no         | no      | no      | no      | no      | no        |
+| supported | no    | yes   | no       | no         | no      | no      | no      | no      | no        |
 | plateform | linux | linux | linux    | linux      | windows | windows | windows | windows | macos     |
 
 
