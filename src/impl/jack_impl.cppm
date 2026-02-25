@@ -262,8 +262,8 @@ namespace mka::audio {
 
 		std::atomic<uint32_t> jackSampleRate = 0;
 		std::atomic<uint32_t> jackBufferSize = 0;
-		std::atomic<uint64_t> xrunCount		 = 0;
-		std::atomic<uint64_t> underrunCount	 = 0;
+		std::atomic<size_t> xrunCount		 = 0;
+		std::atomic<size_t> underrunCount	 = 0;
 	};
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
@@ -295,8 +295,10 @@ namespace mka::audio {
 		if (nframes > constants::MAX_BLOCK_SIZE) return 0;
 
 		const uint32_t fixedBlockSize = engine->blockSize.load(std::memory_order_acquire);
-		if (fixedBlockSize == 0 || fixedBlockSize > constants::MAX_BLOCK_SIZE) return 0;
-		
+		if (fixedBlockSize == 0 || fixedBlockSize > constants::MAX_BLOCK_SIZE) {
+			return 0;
+		}
+
 		size_t processIt = 1;
 		size_t i = 0;
 		
@@ -307,10 +309,37 @@ namespace mka::audio {
 		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
 		const size_t inputCount		= engine->inputCount.load(std::memory_order_acquire);
 		const size_t outputCount	= engine->outputCount.load(std::memory_order_acquire);
-		
+	
+		if (inputCount > constants::MAX_CHANNEL_COUNT || outputCount > constants::MAX_CHANNEL_COUNT) {
+			return 0;
+		}
+
 		block.inputCount = static_cast<uint32_t>(inputCount);
 		block.outputCount = static_cast<uint32_t>(outputCount);
 		
+		JackChannelHandle* inputChannels[constants::MAX_CHANNEL_COUNT] {};
+		JackChannelHandle* outputChannels[constants::MAX_CHANNEL_COUNT] {};
+		size_t inIndex = 0;
+		size_t outIndex = 0;
+		
+		for (i = 0; i < channelCount; ++i) {
+	        auto& ch = engine->openedChannels[i];
+			if (ch.channel.channelInfo.direction == Direction::In) {
+				if (inIndex < inputCount) {
+					inputChannels[inIndex++] = &ch;
+				}
+				continue;
+			}
+
+			if (outIndex < outputCount) {
+				outputChannels[outIndex++] = &ch;
+			}
+		}
+
+		if (inIndex != inputCount || outIndex != outputCount) {
+			return 0;
+		}
+
 		for (i = 0; i < inputCount; ++i) {
 			block.inputs[i] = engine->inputBlockStorage.get() + (i * constants::MAX_BLOCK_SIZE);
 		}
@@ -320,43 +349,42 @@ namespace mka::audio {
 		}
 	
 		// copy inputs in fifo
-		for (i = 0; i < channelCount; ++i) {
-	        auto& ch = engine->openedChannels[i];
-			
-			float* buffer = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
+		for (i = 0; i < inputCount; ++i) {
+	        auto* ch = inputChannels[i];
+			if(!ch || !ch->port) continue;
+
+			float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
 			if(!buffer) continue;
 			
 			size_t copyCount = (nframes < constants::MAX_BLOCK_SIZE) ? nframes : constants::MAX_BLOCK_SIZE;
 			
-			std::memcpy(ch.channel.scratchBuffer, buffer, sizeof(float) * copyCount);
+			std::memcpy(ch->channel.scratchBuffer, buffer, sizeof(float) * copyCount);
 
-			if (ch.channel.channelInfo.direction == Direction::In) {
-				ch.channel.fifo.push(ch.channel.scratchBuffer, copyCount);
-			}
+			ch->channel.fifo.push(ch->channel.scratchBuffer, copyCount);
+			
 		}
 
 		if(inputCount > 0) {
 			processIt = constants::MAX_ITERATION;
 			
-			for (i = 0; i < channelCount; ++i) {
-				auto& ch = engine->openedChannels[i];
-				if (ch.channel.channelInfo.direction == Direction::In) {
-				   	const size_t availableBlocks = ch.channel.fifo.available() / fixedBlockSize;
-					if (availableBlocks < processIt) {
-						processIt = availableBlocks;
-					}
-				}
+			for (i = 0; i < inputCount; ++i) {
+				auto* ch = inputChannels[i];
+				if(!ch) continue;
+
+				const size_t availableBlocks = ch->channel.fifo.available() / fixedBlockSize;
+				if (availableBlocks < processIt) {
+					processIt = availableBlocks;
+				}	
 			}
 		}		
 
 		for(size_t _ = 0; _ < processIt; ++_) {
 
 			// pop inputs in block
-			for (i = 0; i < channelCount; ++i) {
-				auto& ch = engine->openedChannels[i];
-				if (ch.channel.channelInfo.direction == Direction::In) {
-					ch.channel.fifo.pop(block.inputs[i], fixedBlockSize);
-				}
+			for (i = 0; i < inputCount; ++i) {
+				auto* ch = inputChannels[i];
+				if (!ch) continue;
+				ch->channel.fifo.pop(block.inputs[i], fixedBlockSize);
 			}
 		
 			// zero the output	
@@ -367,23 +395,23 @@ namespace mka::audio {
 			engine->callback(block);
 
 		   // push outputs dans FIFO des channels output
-			for (i = 0; i < channelCount; ++i) {
-				auto& ch = engine->openedChannels[i];
-				if (ch.channel.channelInfo.direction == Direction::Out) {
-					ch.channel.fifo.push(block.outputs[i], fixedBlockSize);
-				}
+			for (i = 0; i < outputCount; ++i) {
+				auto* ch = outputChannels[i];
+				if (!ch) continue;
+				ch->channel.fifo.push(block.outputs[i], fixedBlockSize);
+				
 			}
 		}
 	
-		for (i = 0; i < channelCount; ++i) {
-	        auto& ch = engine->openedChannels[i];
-	        if (ch.channel.channelInfo.direction == Direction::In) continue;
+		for (i = 0; i < outputCount; ++i) {
+	        auto* ch = outputChannels[i];
+	        if (!ch || !ch->port) continue;
 
-		    float* buffer = static_cast<float*>(jack_port_get_buffer(ch.port, nframes));
+		    float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
 			if (!buffer) continue;
 
-		    size_t toCopy = (ch.channel.fifo.available() < nframes) ? ch.channel.fifo.available() : nframes;
-			ch.channel.fifo.pop(buffer, toCopy);
+		    size_t toCopy = (ch->channel.fifo.available() < nframes) ? ch->channel.fifo.available() : nframes;
+			ch->channel.fifo.pop(buffer, toCopy);
 
 			// silence if underflow
 			if (toCopy < nframes) {
