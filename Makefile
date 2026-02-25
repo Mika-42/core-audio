@@ -83,6 +83,6 @@ $(BUILD_DIR):
 	@mkdir -p $@
 
 clean:
-	rm -rf $(OBJ_DIR) $(APP) $(BUILD_DIR)
+	rm -rf $(OBJ_DIR) $(APP) $(BUILD_DIR) gcm.cache
 
 .PHONY: all clean examples
