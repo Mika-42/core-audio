@@ -1,12 +1,13 @@
 #include <print>
 #include <iostream>
+#include <limits>
 #include <cmath>
 
 import audio.jack;
 
 void audio_callback(mka::audio::Block& block) {
 	static float phase = {};
-	constexpr float twoPi = 2.0f * static_cast<float>(M_PI);
+	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
 	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
 
 	for(uint32_t i = 0; i < block.blockSize; ++i) {
@@ -14,7 +15,6 @@ void audio_callback(mka::audio::Block& block) {
 
 		phase += phaseIncrement;
 		if (phase >= twoPi) {
-			// Keep the phase bounded to avoid long-running precision loss (pitch drift/jitter).
 			phase -= twoPi;
 		}
 
@@ -24,36 +24,50 @@ void audio_callback(mka::audio::Block& block) {
 	}
 }
 
-void printChannels(const std::vector<mka::audio::ChannelInfo>& channels) {
-    for (auto& ch : channels) {
-		
-		std::println("{{");
-		std::println("\tchannel name:\t\t{},", ch.name);
-		std::println("\tdirection:\t{}", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
-		std::println("}}\n");
-    }
-}
-
 int main() {
 	mka::audio::JACK engine;
 	
-	auto l = engine.getChannels();
-	printChannels(l);
+	// [0] list all availables channels
+	auto channels = engine.getChannels();
+    for (auto& ch : channels) {	
+		std::println("channel name:\t{}", ch.name);
+		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
+    }
+	
+	// [1] select one of them
 	int choice = 0;
-	std::cout << ">> enter number: ";
+	std::print(">> enter number: ");
 	std::cin >> choice;
-
+	
+	// [2] setup the engine
 	engine.setCallback(audio_callback);
 	engine.setSampleRate(48'000);
 	engine.setBlockSize(1024);
 
-	engine.open(l[choice]);
+	// [3] open the desire channel
+	auto ret = engine.open(channels[choice]);
+	if(!ret.ok()) {
+        std::println("error::{}", ret.message);
+        return -1;
+    }
+
+	// [4] start the engine
 	engine.start();
 	
-	std::cout << "press any key to exit.";
-	std::cin >> choice;
+	std::println("press any key to stop audio...");
+	std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+	std::cin.get();
+
+	// [5] stop the engine
 	engine.stop();
-	engine.close();
+	
+	// [] close the engine
+	ret = engine.close();
+	if(!ret.ok()) {
+        std::println("error::{}", ret.message);
+        return -1;
+    }
+
 	return 0;
 }
 
