@@ -369,51 +369,45 @@ namespace mka::audio {
 			
 		}
 
-		// Produce callback blocks only until each output has enough data for the
-		// current JACK period. This prevents unbounded FIFO growth when callback
-		// block size differs from JACK nframes.
+		// Compute exactly how many engine callback blocks we need for this JACK
+		// cycle. This is O(channel_count), bounded, and avoids unbounded loops in
+		// the realtime thread.
 		size_t processIt = 0;
 		if (outputCount == 0) {
-			// Input-only mode: process at most what is currently available.
+			// Input-only mode: run only when at least one full block is ready.
 			processIt = (inputCount == 0) ? 1 : constants::MAX_ITERATION;
+			for (i = 0; i < inputCount; ++i) {
+				auto* ch = inputChannels[i];
+				if (!ch) continue;
+
+				const size_t availableBlocks = ch->channel.fifo.available() / fixedBlockSize;
+				processIt = std::min(processIt, availableBlocks);
+			}
+		} else {
+			size_t minOutputAvailable = constants::MAX_FIFO_SIZE;
+			for (i = 0; i < outputCount; ++i) {
+				auto* ch = outputChannels[i];
+				if (!ch) continue;
+				minOutputAvailable = std::min(minOutputAvailable, ch->channel.fifo.available());
+			}
+
+			if (minOutputAvailable < static_cast<size_t>(nframes)) {
+				const size_t missingSamples = static_cast<size_t>(nframes) - minOutputAvailable;
+				// Ceil division: number of callback blocks required to cover missing
+				// samples for this backend period.
+				processIt = (missingSamples + fixedBlockSize - 1) / fixedBlockSize;
+			}
+
 			if (inputCount > 0) {
+				size_t minInputAvailable = constants::MAX_FIFO_SIZE;
 				for (i = 0; i < inputCount; ++i) {
 					auto* ch = inputChannels[i];
 					if(!ch) continue;
-
-					const size_t availableBlocks = ch->channel.fifo.available() / fixedBlockSize;
-					if (availableBlocks < processIt) {
-						processIt = availableBlocks;
-					}
-				}
-			}
-		} else {
-			while (processIt < constants::MAX_ITERATION) {
-				size_t minOutputAvailable = constants::MAX_FIFO_SIZE;
-				for (i = 0; i < outputCount; ++i) {
-					auto* ch = outputChannels[i];
-					if (!ch) continue;
-					minOutputAvailable = std::min(minOutputAvailable, ch->channel.fifo.available());
+					minInputAvailable = std::min(minInputAvailable, ch->channel.fifo.available());
 				}
 
-				if (minOutputAvailable >= nframes) {
-					break;
-				}
-
-				if (inputCount > 0) {
-					size_t minInputAvailable = constants::MAX_FIFO_SIZE;
-					for (i = 0; i < inputCount; ++i) {
-						auto* ch = inputChannels[i];
-						if(!ch) continue;
-						minInputAvailable = std::min(minInputAvailable, ch->channel.fifo.available());
-					}
-
-					if (minInputAvailable < fixedBlockSize) {
-						break;
-					}
-				}
-
-				++processIt;
+				const size_t maxProcessFromInput = minInputAvailable / fixedBlockSize;
+				processIt = std::min(processIt, maxProcessFromInput);
 			}
 		}
 
