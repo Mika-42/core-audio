@@ -4,6 +4,7 @@ module;
 #include <cmath>
 #include <cstring>
 #include <span>
+#include <cstdint>
 
 export module audio.realtime_pipeline;
 
@@ -46,6 +47,22 @@ export namespace mka::audio::realtime {
 		}
 	}
 
+	inline size_t estimateRequiredResamplerInputFrames(const ResamplerState& resampler,
+									 size_t outputFrames) {
+		// Keep iteration planning in sync with renderOutput(): budget only what the
+		// resampler will really consume to avoid over-producing and FIFO oscillation.
+		const double projected = resampler.phase
+			+ (static_cast<double>(outputFrames) * resampler.step);
+		size_t required = static_cast<size_t>(projected);
+
+		// Until the streaming state is seeded, process() needs bootstrap context.
+		if (!resampler.seeded) {
+			required += 4;
+		}
+
+		return required;
+	}
+
 	inline size_t computeCallbackIterations(
 		std::span<Channel*> inputChannels,
 		std::span<Channel*> outputChannels,
@@ -72,9 +89,12 @@ export namespace mka::audio::realtime {
 		for (Channel* output : outputChannels) {
 			if (!output) continue;
 
-			// Estimate the minimum engine frames needed to cover one backend cycle.
-			const double needed = std::ceil((static_cast<double>(backendFrames) * output->outputResampler.step) + 2.0);
-			const size_t required = static_cast<size_t>(needed);
+			// Use the same phase-aware budgeting as renderOutput() to keep planning
+			// deterministic and prevent jitter between produce/consume sides.
+			const size_t required = estimateRequiredResamplerInputFrames(
+				output->outputResampler,
+				backendFrames
+			);
 			const size_t available = output->fifo.available();
 
 			if (available < required) {
@@ -149,17 +169,39 @@ export namespace mka::audio::realtime {
 		}
 	}
 
-	inline void renderOutput(Channel& channel,
+	inline size_t renderOutput(Channel& channel,
 						float* backendOutput,
 						size_t backendFrames,
 						float* resampleScratch,
 						size_t scratchCapacity) {
 		if (!backendOutput || backendFrames == 0 || !resampleScratch || scratchCapacity == 0) {
-			return;
+			return backendFrames;
 		}
-
-		const double projected = std::ceil((static_cast<double>(backendFrames) * channel.outputResampler.step) + 2.0);
+/*
+	// Important: the output FIFO must only pop frames that the resampler will
+		// actually consume on this cycle. Otherwise we drop valid samples and hear
+		// periodic crackles (data discontinuities).
+		//
+		// For a seeded streaming resampler, the number of new input frames needed to
+		// render `backendFrames` outputs is floor(phase + backendFrames * step).
+		// This is the exact number of interpolation-window advances performed in
+		// ResamplerState::process().
+		const double projected = channel.outputResampler.phase
+			+ (static_cast<double>(backendFrames) * channel.outputResampler.step);
 		size_t requiredInput = static_cast<size_t>(projected);
+		
+		// During startup, process() bootstraps up to 4 samples before it can render.
+		if (!channel.outputResampler.seeded) {
+			requiredInput += 4;
+		}
+*/
+		// Important: pop only frames that the resampler is expected to consume for
+		// this backend cycle (phase-aware budgeting avoids data discontinuities).
+		size_t requiredInput = estimateRequiredResamplerInputFrames(
+			channel.outputResampler,
+			backendFrames
+		);
+
 		if (requiredInput > scratchCapacity) {
 			requiredInput = scratchCapacity;
 		}
@@ -186,5 +228,7 @@ export namespace mka::audio::realtime {
 		for (size_t i = produced; i < backendFrames; ++i) {
 			backendOutput[i] = 0.0f;
 		}
+
+		return backendFrames - produced;
 	}
 }

@@ -34,7 +34,7 @@ engine.setBlockSize(<blockSize>);
 function signature
 
 ```cpp
-void <callback_name>(const mka::audio::Block& block);
+void <callback_name>(mka::audio::Block& block);
 ```
 > [!WARNING]
 > The callback function **must obligatory** respect this signature. 
@@ -42,12 +42,12 @@ void <callback_name>(const mka::audio::Block& block);
 **2.4 - mka::audio::Block structure**
 
 ```cpp
-block.blockSize;                 // read only uint32_t value
-block.sampleRate;                // read only uint32_t value
-block.inputCount;                // read only uint32_t value
-block.outputCount;               // read only uint32_t value
-block.out[<channel>][<frame>];   // read and write float value
-block.in[<channel>][<frame>];    // read only float value
+block.blockSize;                     // read only uint32_t value
+block.sampleRate;                    // read only uint32_t value
+block.inputCount;                    // read only uint32_t value
+block.outputCount;                   // read only uint32_t value
+block.outputs[<channel>][<frame>];   // read and write float value
+block.inputs[<channel>][<frame>];    // read only float value
 ```
 
 Thanks to this structure you can operate over the buffer and access to related datas like samplerate, channels and frames.

@@ -57,6 +57,10 @@ export namespace mka::audio {
 			return state.load() == State::Running;
 		}
 
+		virtual RuntimeStats getRuntimeStats() const {
+			return RuntimeStats {};
+		}
+
 	protected:
 		virtual void run() = 0;
 

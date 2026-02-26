@@ -168,6 +168,17 @@ export namespace mka::audio {
 		}
 	};
 
+	struct RuntimeStats {
+		size_t xrunCount = 0;
+		size_t underrunCount = 0;
+		size_t outputMissingFrames = 0;
+		uint32_t backendSampleRate = 0;
+		uint32_t backendBufferSize = 0;
+		size_t openedChannels = 0;
+		size_t openedInputs = 0;
+		size_t openedOutputs = 0;
+	};
+
 	enum class Backend : uint8_t {
 		Alsa, Jack, PipeWire, PulseAudio,
 		Wasapi, Asio, DirectSound, Wmme,
@@ -184,13 +195,13 @@ export namespace mka::audio {
 		};
 
 		#if defined(_WIN32)
-			inline constexpr Backend backends[] { Wasapi, Asio, DirectSound, Wmme };
+			inline constexpr Backend backends[] { Backend::Wasapi, Backend::Asio, Backend::DirectSound, Backend::Wmme };
 
 		#elif defined(__linux__)
-			inline constexpr Backend backends[] { Alsa, Jack, PipeWire, PulseAudio };
+			inline constexpr Backend backends[] { Backend::Alsa, Backend::Jack, Backend::PipeWire, Backend::PulseAudio };
 
 		#elif defined(__APPLE__)
-			inline constexpr Backend backends[] { CoreAudio };
+			inline constexpr Backend backends[] { Backend::CoreAudio };
 		#endif
 	}
 

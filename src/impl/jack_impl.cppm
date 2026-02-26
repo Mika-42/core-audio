@@ -210,10 +210,27 @@ namespace mka::audio {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			stopNoLock();
 		}
+		
+		RuntimeStats getRuntimeStats() const override {
+			RuntimeStats stats {};
+			stats.xrunCount = xrunCount.load(std::memory_order_relaxed);
+			stats.underrunCount = underrunCount.load(std::memory_order_relaxed);
+			stats.outputMissingFrames = outputMissingFrames.load(std::memory_order_relaxed);
+			stats.backendSampleRate = jackSampleRate.load(std::memory_order_relaxed);
+			stats.backendBufferSize = jackBufferSize.load(std::memory_order_relaxed);
+			stats.openedChannels = channelCount.load(std::memory_order_relaxed);
+			stats.openedInputs = inputCount.load(std::memory_order_relaxed);
+			stats.openedOutputs = outputCount.load(std::memory_order_relaxed);
+			return stats;
+		}
 
 		Result close() override {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			stopNoLock();
+			
+			xrunCount.store(0);
+			underrunCount.store(0);
+			outputMissingFrames.store(0);
 
 			if (client) {
 				const size_t count = channelCount.load(std::memory_order_acquire);
@@ -265,14 +282,14 @@ namespace mka::audio {
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
 		
-		std::atomic<size_t>	  channelCount	 = 0;
-		std::atomic<size_t>	  inputCount	 = 0;
-		std::atomic<size_t>	  outputCount	 = 0;
-
-		std::atomic<uint32_t> jackSampleRate = 0;
-		std::atomic<uint32_t> jackBufferSize = 0;
-		std::atomic<size_t> xrunCount		 = 0;
-		std::atomic<size_t> underrunCount	 = 0;
+		std::atomic<size_t>		channelCount		= 0;
+		std::atomic<size_t>		inputCount			= 0;
+		std::atomic<size_t>		outputCount			= 0;
+		std::atomic<uint32_t>	jackSampleRate		= 0;
+		std::atomic<uint32_t>	jackBufferSize		= 0;
+		std::atomic<size_t>		xrunCount			= 0;
+		std::atomic<size_t>		underrunCount		= 0;
+		std::atomic<size_t>		outputMissingFrames	= 0;
 	};
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
@@ -399,13 +416,20 @@ namespace mka::audio {
 		    float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
 			if (!buffer) continue;
 
-			realtime::renderOutput(
+			const size_t missingFrames = realtime::renderOutput(
 				ch->channel,
 				buffer,
 				nframes,
 				engine->outputResampleScratch.get(),
 				constants::MAX_FIFO_SIZE
 			);
+
+			if (missingFrames > 0) {
+				// Keep telemetry lock-free for realtime safety: one atomic increment for
+				// event count and one for total missing samples.
+				engine->underrunCount.fetch_add(1, std::memory_order_relaxed);
+				engine->outputMissingFrames.fetch_add(missingFrames, std::memory_order_relaxed);
+			}
 		}
 
 		return 0;

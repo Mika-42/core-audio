@@ -41,7 +41,7 @@ int main() {
 	
 	// [2] setup the engine
 	engine.setCallback(audio_callback);
-	engine.setSampleRate(48'000);
+	engine.setSampleRate(22'050);
 	engine.setBlockSize(1024);
 
 	// [3] open the desire channel
