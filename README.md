@@ -52,7 +52,7 @@ block.in[<channel>][<frame>];    // read only float value
 
 Thanks to this structure you can operate over the buffer and access to related datas like samplerate, channels and frames.
 
-### 4. pipeline
+### 3. pipeline
 
 your code must following this pipeline :
 
@@ -80,7 +80,7 @@ graph LR
 	style G fill:#770000
 ```
 
-### 5. Full code
+### 4. Full code
 
 simple_tone_generator example : 
 
@@ -157,4 +157,39 @@ int main() {
 
 	return 0;
 }
+```
+### 5. Implementation detail
+
+```lexicon
+N : Number of frames the backend can proccessed
+```
+
+```algorithm
+# step 1
+for each channel in input_channels
+	input_pointer ← engine.backend_input_audio_pointer[channel.index]
+
+	if channel.device.sample_rate ≠ engine.sample_rate
+		channel.scratch_buffer ← input_pointer[0..N].copy()
+		produced_frames ← channel.input_resampler(
+			data: channel.scratch_buffer,
+			length: N,
+			source_sample_rate: channel.device.sample_rate,
+			destination_sample_rate: engine.sample_rate
+		)
+
+		channel.ring_buffer.push(data: channel.scratch_buffer, length: produced_frames)
+	else
+		channel.ring_buffer.push(data: input_pointer, length: N)
+	endif
+done
+
+# step 2
+# step 3
+
+# step 4
+for each channel in output_channels
+	output_pointer ← engine.backend_output_audio_pointer[channel.index]
+done
+
 ```
