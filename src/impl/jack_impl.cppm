@@ -5,6 +5,7 @@ module;
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,6 +41,8 @@ namespace mka::audio {
 			openedChannels = std::make_unique<JackChannelHandle[]>(constants::MAX_CHANNEL_COUNT);
 			inputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
 			outputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
+			inputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
+			outputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
 
 			jack_status_t status {};
 			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
@@ -160,6 +163,8 @@ namespace mka::audio {
 			handle.channel.deviceInfo.sampleRate = jack_get_sample_rate(client);
 			handle.channel.deviceInfo.bufferSize = jack_get_buffer_size(client);
 			handle.channel.deviceInfo.format	 = Format::Float32;
+			handle.channel.inputResampler.configure(handle.channel.deviceInfo.sampleRate, sampleRate.load());
+			handle.channel.outputResampler.configure(sampleRate.load(), handle.channel.deviceInfo.sampleRate);
 
 			handle.port = port;
 				
@@ -252,6 +257,8 @@ namespace mka::audio {
 		std::unique_ptr<JackChannelHandle[]> openedChannels;
 		std::unique_ptr<float[]> inputBlockStorage;
 		std::unique_ptr<float[]> outputBlockStorage;
+		std::unique_ptr<float[]> inputResampleScratch;
+		std::unique_ptr<float[]> outputResampleScratch;
 
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
@@ -269,6 +276,16 @@ namespace mka::audio {
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->jackSampleRate.store(nframes);
+
+		const size_t channelCount = engine->channelCount.load(std::memory_order_acquire);
+		const uint32_t engineRate = engine->sampleRate.load(std::memory_order_acquire);
+		for (size_t i = 0; i < channelCount; ++i) {
+			auto& channel = engine->openedChannels[i].channel;
+			channel.deviceInfo.sampleRate = nframes;
+			channel.inputResampler.configure(channel.deviceInfo.sampleRate, engineRate);
+			channel.outputResampler.configure(engineRate, channel.deviceInfo.sampleRate);
+		}
+
 		return 0;
 	}
 
@@ -349,17 +366,32 @@ namespace mka::audio {
 	
 		// copy inputs in fifo
 		for (i = 0; i < inputCount; ++i) {
-	        auto* ch = inputChannels[i];
+			auto* ch = inputChannels[i];
 			if(!ch || !ch->port) continue;
 
 			float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
 			if(!buffer) continue;
 			
 			size_t copyCount = (nframes < constants::MAX_BLOCK_SIZE) ? nframes : constants::MAX_BLOCK_SIZE;
-			
+
 			std::memcpy(ch->channel.scratchBuffer, buffer, sizeof(float) * copyCount);
 
-			ch->channel.fifo.push(ch->channel.scratchBuffer, copyCount);
+			// Device->engine resampling path. We convert immediately so the user
+			// callback always receives blocks at engine sample rate.
+			size_t consumed = 0;
+			const size_t maxProduced = constants::MAX_FIFO_SIZE;
+			const size_t produced = ch->channel.inputResampler.process(
+				ch->channel.scratchBuffer,
+				copyCount,
+				engine->inputResampleScratch.get(),
+				maxProduced,
+				consumed
+			);
+			(void)consumed;
+
+			if (produced > 0) {
+				ch->channel.fifo.push(engine->inputResampleScratch.get(), produced);
+			}
 			
 		}
 
@@ -378,18 +410,28 @@ namespace mka::audio {
 				processIt = std::min(processIt, availableBlocks);
 			}
 		} else {
-			size_t minOutputAvailable = constants::MAX_FIFO_SIZE;
+			size_t maxMissingEngineFrames = 0;
 			for (i = 0; i < outputCount; ++i) {
 				auto* ch = outputChannels[i];
 				if (!ch) continue;
-				minOutputAvailable = std::min(minOutputAvailable, ch->channel.fifo.available());
+
+				// FIFO stores engine-rate samples. We estimate how many engine frames
+				// are required to cover the current JACK period after resampling.
+				const double step = ch->channel.outputResampler.step;
+				const size_t neededEngineFrames = static_cast<size_t>(
+					std::ceil((static_cast<double>(nframes) * step) + 2.0)
+				);
+
+				const size_t available = ch->channel.fifo.available();
+				if (available < neededEngineFrames) {
+					maxMissingEngineFrames = std::max(maxMissingEngineFrames, neededEngineFrames - available);
+				}
 			}
 
-			if (minOutputAvailable < static_cast<size_t>(nframes)) {
-				const size_t missingSamples = static_cast<size_t>(nframes) - minOutputAvailable;
-				// Ceil division: number of callback blocks required to cover missing
-				// samples for this backend period.
-				processIt = (missingSamples + fixedBlockSize - 1) / fixedBlockSize;
+			if (maxMissingEngineFrames > 0) {
+				// Ceil division: number of callback blocks required to cover the
+				// estimated missing engine-rate samples for this backend period.
+				processIt = (maxMissingEngineFrames + fixedBlockSize - 1) / fixedBlockSize;
 			}
 
 			if (inputCount > 0) {
@@ -437,14 +479,37 @@ namespace mka::audio {
 		    float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
 			if (!buffer) continue;
 
-		    size_t toCopy = (ch->channel.fifo.available() < nframes) ? ch->channel.fifo.available() : nframes;
-			ch->channel.fifo.pop(buffer, toCopy);
+			// Estimate how many engine-rate frames are needed to generate this JACK
+			// period. +2 keeps one lookahead sample for interpolation continuity.
+			const double step = ch->channel.outputResampler.step;
+			const double projected = std::ceil((static_cast<double>(nframes) * step) + 2.0);
+			size_t requiredInput = static_cast<size_t>(projected);
+			if (requiredInput > constants::MAX_FIFO_SIZE) {
+				requiredInput = constants::MAX_FIFO_SIZE;
+			}
 
-			// silence if underflow
-			if (toCopy < nframes) {
-				for (size_t idx = toCopy; idx < nframes; ++idx) {
-					buffer[idx] = 0.0f;
-				}
+			size_t available = ch->channel.fifo.available();
+			size_t popped = (available < requiredInput) ? available : requiredInput;
+			if (popped > 0) {
+				ch->channel.fifo.pop(engine->outputResampleScratch.get(), popped);
+			}
+
+			size_t consumed = 0;
+			size_t produced = 0;
+			if (popped > 0) {
+				produced = ch->channel.outputResampler.process(
+					engine->outputResampleScratch.get(),
+					popped,
+					buffer,
+					nframes,
+					consumed
+				);
+			}
+			(void)consumed;
+
+			// Zero any tail that could not be produced (startup or underflow).
+			for (size_t idx = produced; idx < nframes; ++idx) {
+				buffer[idx] = 0.0f;
 			}
 		}
 
