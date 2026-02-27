@@ -12,7 +12,7 @@ import audio.block;
 import audio.config;
 
 export namespace mka::audio {
-
+	
 	enum class State : uint8_t { Stopped, Starting, Running, Stopping, Closed };
 
 	/*
@@ -51,6 +51,14 @@ export namespace mka::audio {
 
 		virtual uint32_t getBlockSize() final {
 			return blockSize.load();
+		}
+
+		virtual bool isRunning() const final {
+			return state.load() == State::Running;
+		}
+
+		virtual RuntimeStats getRuntimeStats() const {
+			return RuntimeStats {};
 		}
 
 	protected:

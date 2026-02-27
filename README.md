@@ -34,7 +34,7 @@ engine.setBlockSize(<blockSize>);
 function signature
 
 ```cpp
-void <callback_name>(const mka::audio::Block& block);
+void <callback_name>(mka::audio::Block& block);
 ```
 > [!WARNING]
 > The callback function **must obligatory** respect this signature. 
@@ -42,12 +42,12 @@ void <callback_name>(const mka::audio::Block& block);
 **2.4 - mka::audio::Block structure**
 
 ```cpp
-block.blockSize;                 // read only uint32_t value
-block.sampleRate;                // read only uint32_t value
-block.inputCount;                // read only uint32_t value
-block.outputCount;               // read only uint32_t value
-block.out[<channel>][<frame>];   // read and write float value
-block.in[<channel>][<frame>];    // read only float value
+block.blockSize;                     // read only uint32_t value
+block.sampleRate;                    // read only uint32_t value
+block.inputCount;                    // read only uint32_t value
+block.outputCount;                   // read only uint32_t value
+block.outputs[<channel>][<frame>];   // read and write float value
+block.inputs[<channel>][<frame>];    // read only float value
 ```
 
 Thanks to this structure you can operate over the buffer and access to related datas like samplerate, channels and frames.
@@ -113,19 +113,19 @@ void audio_callback(mka::audio::Block& block) {
 
 int main() {
 	mka::audio::JACK engine;
-	
+
 	// [0] list all availables channels
 	auto channels = engine.getChannels();
     for (auto& ch : channels) {	
 		std::println("channel name:\t{}", ch.name);
 		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
     }
-	
+
 	// [1] select one of them
 	int choice = 0;
 	std::print(">> enter number: ");
 	std::cin >> choice;
-	
+
 	// [2] setup the engine
 	engine.setCallback(audio_callback);
 	engine.setSampleRate(48'000);
@@ -140,14 +140,14 @@ int main() {
 
 	// [4] start the engine
 	engine.start();
-	
+
 	std::println("press any key to stop audio...");
 	std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 	std::cin.get();
 
 	// [5] stop the engine
 	engine.stop();
-	
+
 	// [6] close the engine
 	ret = engine.close();
 	if(!ret.ok()) {

@@ -5,16 +5,19 @@ module;
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <memory>
+#include <span>
 
 export module audio.jack;
 export import audio.block;
 export import audio.config;
 export import audio.error;
 import audio.constants;
+import audio.realtime_pipeline;
 import audio.abstract_core;
 
 namespace mka::audio {
@@ -40,6 +43,8 @@ namespace mka::audio {
 			openedChannels = std::make_unique<JackChannelHandle[]>(constants::MAX_CHANNEL_COUNT);
 			inputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
 			outputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
+			inputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
+			outputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
 
 			jack_status_t status {};
 			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
@@ -160,6 +165,8 @@ namespace mka::audio {
 			handle.channel.deviceInfo.sampleRate = jack_get_sample_rate(client);
 			handle.channel.deviceInfo.bufferSize = jack_get_buffer_size(client);
 			handle.channel.deviceInfo.format	 = Format::Float32;
+			handle.channel.inputResampler.configure(handle.channel.deviceInfo.sampleRate, sampleRate.load());
+			handle.channel.outputResampler.configure(sampleRate.load(), handle.channel.deviceInfo.sampleRate);
 
 			handle.port = port;
 				
@@ -203,10 +210,27 @@ namespace mka::audio {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			stopNoLock();
 		}
+		
+		RuntimeStats getRuntimeStats() const override {
+			RuntimeStats stats {};
+			stats.xrunCount = xrunCount.load(std::memory_order_relaxed);
+			stats.underrunCount = underrunCount.load(std::memory_order_relaxed);
+			stats.outputMissingFrames = outputMissingFrames.load(std::memory_order_relaxed);
+			stats.backendSampleRate = jackSampleRate.load(std::memory_order_relaxed);
+			stats.backendBufferSize = jackBufferSize.load(std::memory_order_relaxed);
+			stats.openedChannels = channelCount.load(std::memory_order_relaxed);
+			stats.openedInputs = inputCount.load(std::memory_order_relaxed);
+			stats.openedOutputs = outputCount.load(std::memory_order_relaxed);
+			return stats;
+		}
 
 		Result close() override {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			stopNoLock();
+			
+			xrunCount.store(0);
+			underrunCount.store(0);
+			outputMissingFrames.store(0);
 
 			if (client) {
 				const size_t count = channelCount.load(std::memory_order_acquire);
@@ -252,23 +276,35 @@ namespace mka::audio {
 		std::unique_ptr<JackChannelHandle[]> openedChannels;
 		std::unique_ptr<float[]> inputBlockStorage;
 		std::unique_ptr<float[]> outputBlockStorage;
+		std::unique_ptr<float[]> inputResampleScratch;
+		std::unique_ptr<float[]> outputResampleScratch;
 
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
 		
-		std::atomic<size_t>	  channelCount	 = 0;
-		std::atomic<size_t>	  inputCount	 = 0;
-		std::atomic<size_t>	  outputCount	 = 0;
-
-		std::atomic<uint32_t> jackSampleRate = 0;
-		std::atomic<uint32_t> jackBufferSize = 0;
-		std::atomic<size_t> xrunCount		 = 0;
-		std::atomic<size_t> underrunCount	 = 0;
+		std::atomic<size_t>		channelCount		= 0;
+		std::atomic<size_t>		inputCount			= 0;
+		std::atomic<size_t>		outputCount			= 0;
+		std::atomic<uint32_t>	jackSampleRate		= 0;
+		std::atomic<uint32_t>	jackBufferSize		= 0;
+		std::atomic<size_t>		xrunCount			= 0;
+		std::atomic<size_t>		underrunCount		= 0;
+		std::atomic<size_t>		outputMissingFrames	= 0;
 	};
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->jackSampleRate.store(nframes);
+
+		const size_t channelCount = engine->channelCount.load(std::memory_order_acquire);
+		const uint32_t engineRate = engine->sampleRate.load(std::memory_order_acquire);
+		for (size_t i = 0; i < channelCount; ++i) {
+			auto& channel = engine->openedChannels[i].channel;
+			channel.deviceInfo.sampleRate = nframes;
+			channel.inputResampler.configure(channel.deviceInfo.sampleRate, engineRate);
+			channel.outputResampler.configure(engineRate, channel.deviceInfo.sampleRate);
+		}
+
 		return 0;
 	}
 
@@ -301,9 +337,7 @@ namespace mka::audio {
 
 		size_t i = 0;
 		
-		Block block {};
-		block.blockSize = fixedBlockSize;
-		block.sampleRate = engine->sampleRate.load(std::memory_order_acquire);
+		const uint32_t engineSampleRate = engine->sampleRate.load(std::memory_order_acquire);
 
 		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
 		const size_t inputCount		= engine->inputCount.load(std::memory_order_acquire);
@@ -313,11 +347,11 @@ namespace mka::audio {
 			return 0;
 		}
 
-		block.inputCount = static_cast<uint32_t>(inputCount);
-		block.outputCount = static_cast<uint32_t>(outputCount);
 		
 		JackChannelHandle* inputChannels[constants::MAX_CHANNEL_COUNT] {};
 		JackChannelHandle* outputChannels[constants::MAX_CHANNEL_COUNT] {};
+		Channel* inputChannelViews[constants::MAX_CHANNEL_COUNT] {};
+		Channel* outputChannelViews[constants::MAX_CHANNEL_COUNT] {};
 		size_t inIndex = 0;
 		size_t outIndex = 0;
 		
@@ -325,13 +359,15 @@ namespace mka::audio {
 	        auto& ch = engine->openedChannels[i];
 			if (ch.channel.channelInfo.direction == Direction::In) {
 				if (inIndex < inputCount) {
-					inputChannels[inIndex++] = &ch;
+					inputChannels[inIndex] = &ch;
+					inputChannelViews[inIndex++] = &ch.channel;
 				}
 				continue;
 			}
 
 			if (outIndex < outputCount) {
-				outputChannels[outIndex++] = &ch;
+				outputChannels[outIndex] = &ch;
+				outputChannelViews[outIndex++] = &ch.channel;
 			}
 		}
 
@@ -340,96 +376,39 @@ namespace mka::audio {
 		}
 
 		for (i = 0; i < inputCount; ++i) {
-			block.inputs[i] = engine->inputBlockStorage.get() + (i * constants::MAX_BLOCK_SIZE);
-		}
-
-		for (i = 0; i < outputCount; ++i) {
-			block.outputs[i] = engine->outputBlockStorage.get() + (i * constants::MAX_BLOCK_SIZE);
-		}
-	
-		// copy inputs in fifo
-		for (i = 0; i < inputCount; ++i) {
-	        auto* ch = inputChannels[i];
+			auto* ch = inputChannels[i];
 			if(!ch || !ch->port) continue;
 
-			float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
-			if(!buffer) continue;
-			
-			size_t copyCount = (nframes < constants::MAX_BLOCK_SIZE) ? nframes : constants::MAX_BLOCK_SIZE;
-			
-			std::memcpy(ch->channel.scratchBuffer, buffer, sizeof(float) * copyCount);
+			float* backendBuffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
+			if(!backendBuffer) continue;
 
-			ch->channel.fifo.push(ch->channel.scratchBuffer, copyCount);
-			
+			realtime::ingestInput(
+				ch->channel,
+				backendBuffer,
+				nframes,
+				engine->inputResampleScratch.get(),
+				constants::MAX_FIFO_SIZE
+			);
 		}
 
-		// Compute exactly how many engine callback blocks we need for this JACK
-		// cycle. This is O(channel_count), bounded, and avoids unbounded loops in
-		// the realtime thread.
-		size_t processIt = 0;
-		if (outputCount == 0) {
-			// Input-only mode: run only when at least one full block is ready.
-			processIt = (inputCount == 0) ? 1 : constants::MAX_ITERATION;
-			for (i = 0; i < inputCount; ++i) {
-				auto* ch = inputChannels[i];
-				if (!ch) continue;
+		const size_t processIt = realtime::computeCallbackIterations(
+			std::span<Channel*>(inputChannelViews, inputCount),
+			std::span<Channel*>(outputChannelViews, outputCount),
+			nframes,
+			fixedBlockSize
+		);
 
-				const size_t availableBlocks = ch->channel.fifo.available() / fixedBlockSize;
-				processIt = std::min(processIt, availableBlocks);
-			}
-		} else {
-			size_t minOutputAvailable = constants::MAX_FIFO_SIZE;
-			for (i = 0; i < outputCount; ++i) {
-				auto* ch = outputChannels[i];
-				if (!ch) continue;
-				minOutputAvailable = std::min(minOutputAvailable, ch->channel.fifo.available());
-			}
+		realtime::runEngine(
+			engine->callback,
+			engineSampleRate,
+			fixedBlockSize,
+			std::span<Channel*>(inputChannelViews, inputCount),
+			std::span<Channel*>(outputChannelViews, outputCount),
+			engine->inputBlockStorage.get(),
+			engine->outputBlockStorage.get(),
+			processIt
+		);
 
-			if (minOutputAvailable < static_cast<size_t>(nframes)) {
-				const size_t missingSamples = static_cast<size_t>(nframes) - minOutputAvailable;
-				// Ceil division: number of callback blocks required to cover missing
-				// samples for this backend period.
-				processIt = (missingSamples + fixedBlockSize - 1) / fixedBlockSize;
-			}
-
-			if (inputCount > 0) {
-				size_t minInputAvailable = constants::MAX_FIFO_SIZE;
-				for (i = 0; i < inputCount; ++i) {
-					auto* ch = inputChannels[i];
-					if(!ch) continue;
-					minInputAvailable = std::min(minInputAvailable, ch->channel.fifo.available());
-				}
-
-				const size_t maxProcessFromInput = minInputAvailable / fixedBlockSize;
-				processIt = std::min(processIt, maxProcessFromInput);
-			}
-		}
-
-		for(size_t _ = 0; _ < processIt; ++_) {
-
-			// pop inputs in block
-			for (i = 0; i < inputCount; ++i) {
-				auto* ch = inputChannels[i];
-				if (!ch) continue;
-				ch->channel.fifo.pop(block.inputs[i], fixedBlockSize);
-			}
-		
-			// zero the output	
-			for (i = 0; i < outputCount; ++i) {
-				std::memset(block.outputs[i], 0, sizeof(float) * fixedBlockSize);
-			}
-
-			engine->callback(block);
-
-		   // push outputs in FIFOs channels output
-			for (i = 0; i < outputCount; ++i) {
-				auto* ch = outputChannels[i];
-				if (!ch) continue;
-				ch->channel.fifo.push(block.outputs[i], fixedBlockSize);
-				
-			}
-		}
-	
 		for (i = 0; i < outputCount; ++i) {
 	        auto* ch = outputChannels[i];
 	        if (!ch || !ch->port) continue;
@@ -437,14 +416,19 @@ namespace mka::audio {
 		    float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
 			if (!buffer) continue;
 
-		    size_t toCopy = (ch->channel.fifo.available() < nframes) ? ch->channel.fifo.available() : nframes;
-			ch->channel.fifo.pop(buffer, toCopy);
+			const size_t missingFrames = realtime::renderOutput(
+				ch->channel,
+				buffer,
+				nframes,
+				engine->outputResampleScratch.get(),
+				constants::MAX_FIFO_SIZE
+			);
 
-			// silence if underflow
-			if (toCopy < nframes) {
-				for (size_t idx = toCopy; idx < nframes; ++idx) {
-					buffer[idx] = 0.0f;
-				}
+			if (missingFrames > 0) {
+				// Keep telemetry lock-free for realtime safety: one atomic increment for
+				// event count and one for total missing samples.
+				engine->underrunCount.fetch_add(1, std::memory_order_relaxed);
+				engine->outputMissingFrames.fetch_add(missingFrames, std::memory_order_relaxed);
 			}
 		}
 
