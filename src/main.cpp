@@ -1,73 +1,76 @@
-#include <print>
+#include <cmath>
 #include <iostream>
 #include <limits>
-#include <cmath>
+#include <numbers>
+#include <print>
 
-import audio.jack;
+import audio.alsa;
 
 void audio_callback(mka::audio::Block& block) {
-	static float phase = {};
+	static float phase = 0.0f;
 	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
 	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
 
-	for(uint32_t i = 0; i < block.blockSize; ++i) {
-		float sample = sinf(phase);
+	for (uint32_t i = 0; i < block.blockSize; ++i) {
+		const float sample = std::sinf(phase) * 0.2f;
 
 		phase += phaseIncrement;
 		if (phase >= twoPi) {
 			phase -= twoPi;
 		}
 
-		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
+		for (uint32_t ch = 0; ch < block.outputCount; ++ch) {
 			block.outputs[ch][i] = sample;
 		}
 	}
 }
 
 int main() {
-	mka::audio::JACK engine;
-	
-	// [0] list all availables channels
+	mka::audio::ALSA engine;
+
 	auto channels = engine.getChannels();
-    for (auto& ch : channels) {	
-		std::println("channel name:\t{}", ch.name);
-		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
-    }
-	
-	// [1] select one of them
-	int choice = 0;
-	std::print(">> enter number: ");
+	if (channels.empty()) {
+		std::println("No ALSA channels available (default device).");
+		return -1;
+	}
+
+	std::println("Available ALSA channels:");
+	for (size_t i = 0; i < channels.size(); ++i) {
+		const auto& ch = channels[i];
+		std::println("[{}] {} ({})", i, ch.name, ch.direction == mka::audio::Direction::In ? "Input" : "Output");
+	}
+
+	int choice = -1;
+	std::print(">> Select a channel index: ");
 	std::cin >> choice;
-	
-	// [2] setup the engine
+
+	if (choice < 0 || static_cast<size_t>(choice) >= channels.size()) {
+		std::println("Invalid channel index.");
+		return -1;
+	}
+
 	engine.setCallback(audio_callback);
-	engine.setSampleRate(22'050);
-	engine.setBlockSize(1024);
+	engine.setSampleRate(48'000);
+	engine.setBlockSize(256);
 
-	// [3] open the desire channel
-	auto ret = engine.open(channels[choice]);
-	if(!ret.ok()) {
-        std::println("error::{}", ret.message);
-        return -1;
-    }
+	auto ret = engine.open(channels[static_cast<size_t>(choice)]);
+	if (!ret.ok()) {
+		std::println("open failed: {}", ret.message ? ret.message : "unknown error");
+		return -1;
+	}
 
-	// [4] start the engine
 	engine.start();
-	
-	std::println("press any key to stop audio...");
+
+	std::println("ALSA engine started. Press ENTER to stop...");
 	std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 	std::cin.get();
 
-	// [5] stop the engine
 	engine.stop();
-	
-	// [] close the engine
 	ret = engine.close();
-	if(!ret.ok()) {
-        std::println("error::{}", ret.message);
-        return -1;
-    }
+	if (!ret.ok()) {
+		std::println("close failed: {}", ret.message ? ret.message : "unknown error");
+		return -1;
+	}
 
 	return 0;
 }
-

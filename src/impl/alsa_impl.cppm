@@ -1,482 +1,665 @@
 module;
 
-#include <iostream>
-#include <cstring>
-#include <algorithm>
-#include <atomic>
-#include <thread>
-#include <vector>
-#include <cstdio>
 #include <alsa/asoundlib.h>
 
-#include <sys/mman.h>
-
-inline void logAlsaError(const char* what, int code) {
-	std::fprintf(stderr, "[ALSA] %s failed: %s (%d)\n", what, snd_strerror(code), code);
-}
-
-#define ALSA_CHECK(_call_or_value, _error_code)	do {							\
-	int _alsa_retcode = (_call_or_value);										\
-	if(_alsa_retcode < 0) {														\
-		logAlsaError(#_call_or_value, _alsa_retcode);							\
-		return mka::audio::Result { _error_code, snd_strerror(_alsa_retcode) };	\
-	}																			\
-} while(0);
-
-#define ALSA_LOG_ERROR(_call_or_value)	do {						\
-	int _alsa_retcode = (_call_or_value);							\
-	if(_alsa_retcode < 0) {											\
-		logAlsaError(#_call_or_value, _alsa_retcode);				\
-	}																\
-} while(0);
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <poll.h>
+#include <cstdlib>
+#include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
 export module audio.alsa;
 export import audio.block;
 export import audio.config;
 export import audio.error;
-
 import audio.abstract_core;
+import audio.constants;
+import audio.realtime_pipeline;
 
-//---- alsa wrapper ----//
-snd_pcm_format_t select_format(mka::audio::Format fmt) {
-    switch(fmt) {
-        case mka::audio::Format::Int16:   return SND_PCM_FORMAT_S16_LE;
-        case mka::audio::Format::Int24:   return SND_PCM_FORMAT_S24_LE;
-        case mka::audio::Format::Int32:   return SND_PCM_FORMAT_S32_LE;
-        case mka::audio::Format::Float32: return SND_PCM_FORMAT_FLOAT_LE;
-        case mka::audio::Format::Float64: return SND_PCM_FORMAT_FLOAT64_LE;
-    }
-    return SND_PCM_FORMAT_FLOAT_LE;
-}
+namespace mka::audio {
 
-bool add_format(std::vector<mka::audio::Format>& v, snd_pcm_format_t f) {
-    auto push = [&](mka::audio::Format fmt)
-    {
-        if (std::find(v.begin(), v.end(), fmt) == v.end()) {
-			v.push_back(fmt);
+	namespace {
+		inline void logAlsaError(const char* what, int code) {
+			std::fprintf(stderr, "[ALSA] %s failed: %s (%d)\n", what, snd_strerror(code), code);
 		}
-    };
 
-    switch (f)
-    {
-        case SND_PCM_FORMAT_FLOAT_LE:    push(mka::audio::Format::Float32); return true;
-        case SND_PCM_FORMAT_FLOAT64_LE:  push(mka::audio::Format::Float64); return true;
-        case SND_PCM_FORMAT_S16_LE:      push(mka::audio::Format::Int16);   return true;
-        case SND_PCM_FORMAT_S24_LE:      push(mka::audio::Format::Int24);   return true;
-        case SND_PCM_FORMAT_S32_LE:      push(mka::audio::Format::Int32);   return true;
-        default: return false;
-    }
-}
+		struct ParsedChannelName {
+			std::string device;
+			snd_pcm_stream_t stream = SND_PCM_STREAM_PLAYBACK;
+			uint32_t channelIndex = 0;
+		};
 
-mka::audio::Result setup_pcm(
-		snd_pcm_t**			handle, 
-		const char*			device_name, 
-		snd_pcm_stream_t	stream_mode, 
-		uint32_t			channels,
-		int&				descriptor_count,
-		uint32_t&			samplerate,
-		uint32_t			buffer_size,
-		mka::audio::Format	fmt) {
+		bool parseChannelName(std::string_view name, ParsedChannelName& out) {
+			const size_t firstSep = name.find(':');
+			if (firstSep == std::string_view::npos) return false;
+			const size_t secondSep = name.find(':', firstSep + 1);
+			if (secondSep == std::string_view::npos) return false;
 
-	// open the output device
-	ALSA_CHECK(snd_pcm_open(handle, device_name, stream_mode, SND_PCM_NONBLOCK), mka::audio::Error::DeviceOpenFailed);
-				
-	// setup output hardware
-	snd_pcm_hw_params_t* hw = nullptr;
-	snd_pcm_hw_params_alloca(&hw);
-	ALSA_CHECK(snd_pcm_hw_params_any(*handle, hw), mka::audio::Error::HardwareSetupFailed);
-	snd_pcm_uframes_t	bufferSize	= buffer_size * 2;
-	snd_pcm_uframes_t	periodSize	= buffer_size;	
-	snd_pcm_format_t	desired_format = select_format(fmt);
-	snd_pcm_format_t	real_format = {};
+			const std::string_view deviceView = name.substr(0, firstSep);
+			const std::string_view streamView = name.substr(firstSep + 1, secondSep - firstSep - 1);
+			const std::string_view indexView = name.substr(secondSep + 1);
 
-	ALSA_CHECK(snd_pcm_hw_params_set_access(*handle, hw, SND_PCM_ACCESS_MMAP_NONINTERLEAVED), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_format(*handle, hw, desired_format), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_get_format(hw, &real_format), mka::audio::Error::SetupHardwareParameterFailed);
+			if (deviceView.empty() || indexView.empty()) return false;
 
-	if(real_format != desired_format) {
-		return mka::audio::Result { mka::audio::Error::SetupHardwareParameterFailed, "Audio format is not supported" };
+			char* end = nullptr;
+			const unsigned long parsed = std::strtoul(std::string(indexView).c_str(), &end, 10);
+			if (!end || *end != '\0') return false;
+
+			out.device = std::string(deviceView);
+			out.channelIndex = static_cast<uint32_t>(parsed);
+
+			if (streamView == "out") {
+				out.stream = SND_PCM_STREAM_PLAYBACK;
+				return true;
+			}
+			if (streamView == "in") {
+				out.stream = SND_PCM_STREAM_CAPTURE;
+				return true;
+			}
+
+			return false;
+		}
+
+		uint32_t queryMaxChannels(const char* device, snd_pcm_stream_t stream) {
+			snd_pcm_t* handle = nullptr;
+			const int openErr = snd_pcm_open(&handle, device, stream, SND_PCM_NONBLOCK);
+			if (openErr < 0 || !handle) {
+				return 0;
+			}
+
+			snd_pcm_hw_params_t* hw = nullptr;
+			snd_pcm_hw_params_alloca(&hw);
+			if (snd_pcm_hw_params_any(handle, hw) < 0) {
+				snd_pcm_close(handle);
+				return 0;
+			}
+
+			unsigned int maxChannels = 0;
+			if (snd_pcm_hw_params_get_channels_max(hw, &maxChannels) < 0) {
+				snd_pcm_close(handle);
+				return 0;
+			}
+
+			snd_pcm_close(handle);
+			if (maxChannels == 0) return 0;
+			return std::min<uint32_t>(maxChannels, constants::MAX_CHANNEL_COUNT);
+		}
+
+		float* channelPtr(const snd_pcm_channel_area_t* area, snd_pcm_uframes_t offset) {
+			if (!area || !area->addr) return nullptr;
+
+			return reinterpret_cast<float*>(
+				static_cast<char*>(area->addr)
+				+ (area->first / 8)
+				+ (offset * (area->step / 8))
+			);
+		}
 	}
 
-	ALSA_CHECK(snd_pcm_hw_params_set_channels(*handle, hw, channels), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_rate_near(*handle, hw, &samplerate, nullptr), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_buffer_size_near(*handle, hw, &bufferSize), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_period_size_near(*handle, hw, &periodSize, nullptr), mka::audio::Error::SetupHardwareParameterFailed);	
-	ALSA_CHECK(snd_pcm_hw_params(*handle, hw), mka::audio::Error::HardwareSetupFailed);
-	// setup output software	
-	snd_pcm_sw_params_t* sw = nullptr;
-	snd_pcm_sw_params_alloca(&sw);
+	struct AlsaChannelHandle {
+		Channel channel;
+		uint32_t channelIndex = 0;
+		snd_pcm_stream_t stream = SND_PCM_STREAM_PLAYBACK;
+		std::string device;
+	};
 
-	ALSA_CHECK(snd_pcm_sw_params_current(*handle, sw), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_sw_params_set_start_threshold(*handle, sw, buffer_size), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_sw_params_set_avail_min(*handle, sw, buffer_size), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_sw_params(*handle, sw), mka::audio::Error::SetupHardwareParameterFailed);
-	
-	// poll descriptors count
-	descriptor_count = snd_pcm_poll_descriptors_count(*handle);
+	export class ALSA final : public AbstractCoreAudio {
 
-	if(descriptor_count < 0) {
-		logAlsaError("snd_pcm_poll_descriptors_count", descriptor_count);
-		return mka::audio::Result {mka::audio::Error::PollSetupFailed, snd_strerror(descriptor_count)};
-	}
-
-	return mka::audio::Ok;
-}
-
-bool begin(
-		snd_pcm_t* handle,
-		const snd_pcm_channel_area_t **areas,
-		snd_pcm_uframes_t buffer_size,
-		uint32_t channels,
-		snd_pcm_uframes_t& offset,
-		snd_pcm_uframes_t& frames, std::span<float*> ptrs) {
-
-	if(channels == 0) {
-		return false;
-	}
-
-	snd_pcm_sframes_t avail = snd_pcm_avail_update(handle);
-
-	if(avail < 0) {
-		ALSA_LOG_ERROR(snd_pcm_recover(handle, avail, 1));
-		return false;
-	}
-
-	frames = std::min(static_cast<snd_pcm_uframes_t>(avail), buffer_size);
-
-	if(frames == 0) {
-		return false;
-	}
-
-	int err = snd_pcm_mmap_begin(handle, areas, &offset, &frames);
-
-	if(err < 0) {
-		ALSA_LOG_ERROR(snd_pcm_recover(handle, err, 1));
-		return false;
-	}
-
-	for(uint32_t channel = 0; channel < channels; ++channel) {
-		ptrs[channel] = reinterpret_cast<float*>(
-			static_cast<char*>(areas[channel]->addr)
-			+ (areas[channel]->first / 8)
-			+ offset * (areas[channel]->step / 8)
-		);
-	}
-
-	return true;
-}
-
-export int list_dev() {
-    int card = -1;
-
-    if (snd_card_next(&card) < 0 || card < 0) {
-        std::cerr << "Aucune carte ALSA trouvée\n";
-        return 1;
-    }
-
-    while (card >= 0) {
-
-        snd_ctl_t* ctl = nullptr;
-        char card_name[32];
-        sprintf(card_name, "hw:%d", card);
-
-        if (snd_ctl_open(&ctl, card_name, 0) < 0) {
-            std::cerr << "Impossible d'ouvrir " << card_name << "\n";
-            snd_card_next(&card);
-            continue; // ⚠️ on ne ferme pas ctl ici
-        }
-
-        snd_ctl_card_info_t* info;
-        snd_ctl_card_info_alloca(&info);
-
-        if (snd_ctl_card_info(ctl, info) == 0) {
-            std::cout << "Carte " << card << " : "
-                      << snd_ctl_card_info_get_name(info)
-                      << "\n";
-        }
-
-        int device = -1;
-
-        while (true) {
-            if (snd_ctl_pcm_next_device(ctl, &device) < 0)
-                break;
-
-            if (device < 0)
-                break;
-
-            snd_pcm_info_t* pcm_info;
-            snd_pcm_info_alloca(&pcm_info);
-
-            snd_pcm_info_set_device(pcm_info, device);
-            snd_pcm_info_set_subdevice(pcm_info, 0);
-
-            snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_PLAYBACK);
-            if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
-                std::cout << "  Device " << device
-                          << " (Playback): "
-                          << snd_pcm_info_get_name(pcm_info)
-                          << "\n";
-            }
-
-            snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_CAPTURE);
-            if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
-                std::cout << "  Device " << device
-                          << " (Capture): "
-                          << snd_pcm_info_get_name(pcm_info)
-                          << "\n";
-            }
-        }
-
-        snd_ctl_close(ctl);
-
-        // ⚠️ TRÈS IMPORTANT
-        snd_card_next(&card);
-    }
-
-    return 0;
-
-}
-//---------------------//
-export namespace mka::audio {
-
-	class ALSA final: public AbstractCoreAudio {
-	
 	public:
-		ALSA() = default;
-		
-		std::vector<Device> devicesList() {
-			return std::vector<Device>();
-		}
-		
-		Result open(const Config& cfg) override {
-			config = cfg;
-			
-			// poll descriptors count
-			
-			if(config.outChannels > 0) {
+		ALSA() {
+			openedChannels = std::make_unique<AlsaChannelHandle[]>(constants::MAX_CHANNEL_COUNT);
+			inputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
+			outputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
+			inputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
+			outputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
 
-				Result ret = setup_pcm(
-						&playback, 
-						config.name.c_str(),
-						SND_PCM_STREAM_PLAYBACK,
-						config.outChannels,
-						outCount,
-						config.samplerate,
-						config.bufferSize, 
-						config.audioFormat
-				);
-				
-				if(!ret.ok()) {
-					return ret;
+			sampleRate.store(48'000);
+			blockSize.store(256);
+			state.store(State::Stopped);
+		}
+
+		~ALSA() override {
+			close();
+		}
+
+		std::vector<ChannelInfo> getChannels() override {
+			// We expose ALSA channels as: <device>:<in|out>:<index>
+			// This mirrors JACK's per-channel open() workflow while still targeting
+			// ALSA's device-oriented API.
+			constexpr const char* kDefaultDevice = "default";
+			std::vector<ChannelInfo> channels;
+
+			const uint32_t maxOut = queryMaxChannels(kDefaultDevice, SND_PCM_STREAM_PLAYBACK);
+			const uint32_t maxIn = queryMaxChannels(kDefaultDevice, SND_PCM_STREAM_CAPTURE);
+
+			channels.reserve(maxOut + maxIn);
+
+			for (uint32_t i = 0; i < maxOut; ++i) {
+				ChannelInfo info {};
+				std::snprintf(info.name, sizeof(info.name), "%s:out:%u", kDefaultDevice, i);
+				info.direction = Direction::Out;
+				channels.emplace_back(info);
+			}
+
+			for (uint32_t i = 0; i < maxIn; ++i) {
+				ChannelInfo info {};
+				std::snprintf(info.name, sizeof(info.name), "%s:in:%u", kDefaultDevice, i);
+				info.direction = Direction::In;
+				channels.emplace_back(info);
+			}
+
+			return channels;
+		}
+
+		Result open(const ChannelInfo channel) override {
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+
+			if (state.load() != State::Stopped) {
+				return Result { Error::WouldBlock, "Engine must be stopped before opening ALSA channels." };
+			}
+
+			size_t count = channelCount.load(std::memory_order_acquire);
+			if (count >= constants::MAX_CHANNEL_COUNT) {
+				return Result { Error::GenericError, "Maximum channel count reached." };
+			}
+
+			for (size_t i = 0; i < count; ++i) {
+				if (std::strcmp(openedChannels[i].channel.channelInfo.name, channel.name) == 0) {
+					return Result { Error::AlreadyExists, "Channel already opened." };
 				}
 			}
 
-			if(config.inChannels > 0) {
-				Result ret = setup_pcm(
-						&capture,
-						config.name.c_str(), 
-						SND_PCM_STREAM_CAPTURE, 
-						config.inChannels, 
-						inCount, 
-						config.samplerate, 
-						config.bufferSize, 
-						config.audioFormat
-				);
-
-				if(!ret.ok()) {
-					return ret;
-				}
+			ParsedChannelName parsed {};
+			if (!parseChannelName(channel.name, parsed)) {
+				return Result { Error::GenericError, "Invalid ALSA channel name. Expected <device>:<in|out>:<index>." };
 			}
 
-			const size_t totalCount = outCount + inCount;
-
-			if(totalCount <= 0) {
-				return Result{Error::PollSetupFailed, "Invalid poll descriptor count"};
+			const bool isInput = (channel.direction == Direction::In);
+			if ((isInput && parsed.stream != SND_PCM_STREAM_CAPTURE)
+				|| (!isInput && parsed.stream != SND_PCM_STREAM_PLAYBACK)) {
+				return Result { Error::GenericError, "Direction mismatch in ALSA channel description." };
 			}
 
-			pfds.resize(totalCount);
-			
-			if(config.outChannels > 0) {
-				// poll descriptors out
-				ALSA_CHECK(snd_pcm_poll_descriptors(playback, pfds.data(), outCount), Error::PollDescriptorsFailed);
+			Result setupRet = isInput
+				? ensureCaptureConfigured(parsed.device)
+				: ensurePlaybackConfigured(parsed.device);
+			if (!setupRet.ok()) {
+				return setupRet;
 			}
 
-			if(config.inChannels > 0) { 
-				// poll descriptors in
-				ALSA_CHECK(snd_pcm_poll_descriptors(capture, pfds.data() + outCount, inCount), Error::PollDescriptorsFailed);
+			const uint32_t maxSupported = isInput ? captureHardwareChannels : playbackHardwareChannels;
+			if (parsed.channelIndex >= maxSupported) {
+				return Result { Error::SetupHardwareParameterFailed, "Requested ALSA channel index exceeds hardware capacity." };
 			}
 
-			outPtrs.resize(config.outChannels, nullptr);
-			inPtrs.resize(config.inChannels, nullptr);
-			
-			mlockall(MCL_CURRENT | MCL_FUTURE);			
-			
-			return mka::audio::Ok;
+			AlsaChannelHandle& handle = openedChannels[count];
+			handle.channelIndex = parsed.channelIndex;
+			handle.stream = parsed.stream;
+			handle.device = parsed.device;
+			handle.channel.deviceInfo.sampleRate = backendSampleRate.load(std::memory_order_acquire);
+			handle.channel.deviceInfo.bufferSize = backendBufferSize.load(std::memory_order_acquire);
+			handle.channel.deviceInfo.format = Format::Float32;
+			handle.channel.inputResampler.configure(
+				handle.channel.deviceInfo.sampleRate,
+				sampleRate.load(std::memory_order_acquire)
+			);
+			handle.channel.outputResampler.configure(
+				sampleRate.load(std::memory_order_acquire),
+				handle.channel.deviceInfo.sampleRate
+			);
+
+			std::strncpy(handle.channel.channelInfo.name, channel.name, sizeof(handle.channel.channelInfo.name) - 1);
+			handle.channel.channelInfo.name[sizeof(handle.channel.channelInfo.name) - 1] = '\0';
+			handle.channel.channelInfo.direction = channel.direction;
+
+			channelCount.store(count + 1, std::memory_order_release);
+			if (isInput) {
+				inputCount.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				outputCount.fetch_add(1, std::memory_order_relaxed);
+			}
+
+			return Ok;
 		}
-		
+
+		void start() override {
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+			if (state.load() != State::Stopped) return;
+			if (!playback && !capture) return;
+
+			state.store(State::Starting);
+			workerStop.store(false, std::memory_order_release);
+			worker = std::thread([this]() { run(); });
+			state.store(State::Running);
+		}
+
+		void stop() override {
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+			stopNoLock();
+		}
+
 		Result close() override {
-			
-			munlockall();
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+			stopNoLock();
 
-			if(playback) {
-				ALSA_LOG_ERROR(snd_pcm_drain(playback));
-				ALSA_LOG_ERROR(snd_pcm_close(playback));
+			xrunCount.store(0);
+			underrunCount.store(0);
+			outputMissingFrames.store(0);
+
+			if (playback) {
+				snd_pcm_close(playback);
 				playback = nullptr;
 			}
-			
-			if(capture) {
-				ALSA_LOG_ERROR(snd_pcm_drain(capture));
-				ALSA_LOG_ERROR(snd_pcm_close(capture));
+			if (capture) {
+				snd_pcm_close(capture);
 				capture = nullptr;
 			}
-			return mka::audio::Ok;
+
+			channelCount.store(0);
+			inputCount.store(0);
+			outputCount.store(0);
+			pollDescriptors.clear();
+			playbackDescriptorCount = 0;
+			captureDescriptorCount = 0;
+			playbackHardwareChannels = 0;
+			captureHardwareChannels = 0;
+			state.store(State::Closed);
+			return Ok;
+		}
+
+		RuntimeStats getRuntimeStats() const override {
+			RuntimeStats stats {};
+			stats.xrunCount = xrunCount.load(std::memory_order_relaxed);
+			stats.underrunCount = underrunCount.load(std::memory_order_relaxed);
+			stats.outputMissingFrames = outputMissingFrames.load(std::memory_order_relaxed);
+			stats.backendSampleRate = backendSampleRate.load(std::memory_order_relaxed);
+			stats.backendBufferSize = backendBufferSize.load(std::memory_order_relaxed);
+			stats.openedChannels = channelCount.load(std::memory_order_relaxed);
+			stats.openedInputs = inputCount.load(std::memory_order_relaxed);
+			stats.openedOutputs = outputCount.load(std::memory_order_relaxed);
+			return stats;
 		}
 
 	protected:
-
 		void run() override {
-
-			const bool hasPlayback = config.outChannels > 0;
-			const bool hasCapture  = config.inChannels  > 0;
-			bool playbackStarted = false;
-	
-			const snd_pcm_channel_area_t* outAreas = nullptr;
-			const snd_pcm_channel_area_t* inAreas  = nullptr;
-			snd_pcm_uframes_t framesPlayback = 0;
-			snd_pcm_uframes_t framesCapture  = 0;
-			snd_pcm_uframes_t playbackOffset = 0;
-			snd_pcm_uframes_t captureOffset  = 0;
-
-			if(hasPlayback) {
-		        ALSA_LOG_ERROR(snd_pcm_prepare(playback));
-		        playbackStarted = false;
-		    }
-
-		    if(hasCapture) {
-		        ALSA_LOG_ERROR(snd_pcm_prepare(capture));
-		        ALSA_LOG_ERROR(snd_pcm_start(capture));
-		    }
-
-			while(running.load(std::memory_order_acquire)) {
-
-				if(poll(pfds.data(), pfds.size(), -1) <= 0) {
-					continue;
-				}
-
-				unsigned short revOut = 0, revIn = 0;
-
-				if(hasPlayback) {
-					ALSA_LOG_ERROR(snd_pcm_poll_descriptors_revents(playback, pfds.data(), outCount, &revOut));
-				}
-
-				if(hasCapture) {
-					ALSA_LOG_ERROR(snd_pcm_poll_descriptors_revents(capture, pfds.data() + outCount, inCount, &revIn));
-				}
-
-				if((revOut | revIn) & POLLERR) {
-					if(hasPlayback) {
-						ALSA_LOG_ERROR(snd_pcm_recover(playback, -EPIPE, 1));
-					}
-
-					if(hasCapture) {
-						ALSA_LOG_ERROR(snd_pcm_recover(capture,  -EPIPE, 1));
-					}
-
-					continue;
-				}
-
-
-				bool readyPlayback = hasPlayback && begin(playback, &outAreas, config.bufferSize, config.outChannels, playbackOffset, framesPlayback, outPtrs);
-				bool readyCapture  = hasCapture  && (revIn  & POLLIN) && begin(capture, &inAreas, config.bufferSize, config.inChannels, captureOffset, framesCapture, inPtrs);
-
-				if(!readyPlayback && !readyCapture) {
-					continue;
-				}
-				
-				snd_pcm_uframes_t frames = config.bufferSize;
-
-				if(readyPlayback) frames = std::min(frames, framesPlayback);
-				if(readyCapture)  frames = std::min(frames, framesCapture);
-
-				if(frames == 0) continue;
-
-				mka::audio::Block block {
-					.samplerate  = config.samplerate,
-					.outChannels = readyPlayback ? config.outChannels : 0,
-				    .inChannels  = readyCapture  ? config.inChannels  : 0,
-					.frames      = static_cast<uint32_t>(frames),
-					.out         = readyPlayback ? outPtrs.data() : nullptr,
-					.in          = readyCapture  ? inPtrs.data()  : nullptr
-		        };
-
-				if(callback) {
-					callback(block);
-				} else if(readyPlayback) {
-					for(uint32_t ch = 0; ch < block.outChannels; ++ch) {
-		                std::memset(block.out[ch], 0, block.frames * sizeof(float));
-					}
-				}
-
-				if(readyPlayback) {
-					snd_pcm_sframes_t committed = snd_pcm_mmap_commit(playback, playbackOffset, frames);
-					if(committed < 0) {
-						logAlsaError("snd_pcm_mmap_commit(playback)", static_cast<int>(committed));
-						ALSA_LOG_ERROR(snd_pcm_recover(playback, static_cast<int>(committed), 1));
-						playbackStarted = false;
-						continue;
-					}
-					
-					if(static_cast<snd_pcm_uframes_t>(committed) != frames) {
-						std::fprintf(stderr, "[ALSA] short playback commit: requested=%lu committed=%ld\n",
-							static_cast<unsigned long>(frames),
-							static_cast<long>(committed));
-					}
-
-					if(!playbackStarted) {
-						snd_pcm_state_t state = snd_pcm_state(playback);
-						if(state == SND_PCM_STATE_PREPARED) {
-							int startErr = snd_pcm_start(playback);
-							if(startErr < 0) {
-								logAlsaError("snd_pcm_start(playback)", startErr);
-								ALSA_LOG_ERROR(snd_pcm_recover(playback, startErr, 1));
-							} else {
-								playbackStarted = true;
-							}
-						} else if(state == SND_PCM_STATE_RUNNING) {
-							playbackStarted = true;
-						}
-					}
-				}
-
-				if(readyCapture) {
-					snd_pcm_sframes_t committed = snd_pcm_mmap_commit(capture, captureOffset, frames);
-					if(committed < 0) {
-						logAlsaError("snd_pcm_mmap_commit(capture)", static_cast<int>(committed));
-						ALSA_LOG_ERROR(snd_pcm_recover(capture, static_cast<int>(committed), 1));
-					}
-				}
+			if (playback) {
+				const int prepErr = snd_pcm_prepare(playback);
+				if (prepErr < 0) logAlsaError("snd_pcm_prepare(playback)", prepErr);
+			}
+			if (capture) {
+				const int prepErr = snd_pcm_prepare(capture);
+				if (prepErr < 0) logAlsaError("snd_pcm_prepare(capture)", prepErr);
+				const int startErr = snd_pcm_start(capture);
+				if (startErr < 0) logAlsaError("snd_pcm_start(capture)", startErr);
 			}
 
-			if(hasPlayback) {
-				ALSA_LOG_ERROR(snd_pcm_drop(playback));
-			}
-		
-			if(hasCapture) {
-				ALSA_LOG_ERROR(snd_pcm_drop(capture));
+			while (!workerStop.load(std::memory_order_acquire)) {
+				if (pollDescriptors.empty()) {
+					std::this_thread::yield();
+					continue;
+				}
+
+				if (poll(pollDescriptors.data(), static_cast<nfds_t>(pollDescriptors.size()), 100) <= 0) {
+					continue;
+				}
+
+				unsigned short reventsOut = 0;
+				unsigned short reventsIn = 0;
+				if (playback && playbackDescriptorCount > 0) {
+					snd_pcm_poll_descriptors_revents(playback, pollDescriptors.data(), playbackDescriptorCount, &reventsOut);
+				}
+				if (capture && captureDescriptorCount > 0) {
+					snd_pcm_poll_descriptors_revents(capture, pollDescriptors.data() + playbackDescriptorCount, captureDescriptorCount, &reventsIn);
+				}
+
+				if ((reventsOut | reventsIn) & POLLERR) {
+					handleRecoverableXrun(playback);
+					handleRecoverableXrun(capture);
+					continue;
+				}
+
+				processCycle();
 			}
 		}
 
+	private:
+		void stopNoLock() {
+			if (state.load() != State::Running) return;
+			state.store(State::Stopping);
+			workerStop.store(true, std::memory_order_release);
+			if (worker.joinable()) {
+				worker.join();
+			}
+			if (playback) snd_pcm_drop(playback);
+			if (capture) snd_pcm_drop(capture);
+			state.store(State::Stopped);
+		}
+
+		Result ensurePlaybackConfigured(const std::string& device) {
+			if (playback) {
+				if (playbackDevice == device) return Ok;
+				return Result { Error::WouldBlock, "Playback device already selected. Close engine to switch ALSA device." };
+			}
+			return configurePcm(&playback, device, SND_PCM_STREAM_PLAYBACK, playbackDescriptorCount, playbackHardwareChannels);
+		}
+
+		Result ensureCaptureConfigured(const std::string& device) {
+			if (capture) {
+				if (captureDevice == device) return Ok;
+				return Result { Error::WouldBlock, "Capture device already selected. Close engine to switch ALSA device." };
+			}
+			return configurePcm(&capture, device, SND_PCM_STREAM_CAPTURE, captureDescriptorCount, captureHardwareChannels);
+		}
+
+		Result configurePcm(
+			snd_pcm_t** outHandle,
+			const std::string& device,
+			snd_pcm_stream_t stream,
+			int& descriptorCount,
+			uint32_t& hardwareChannels) {
+
+			int err = snd_pcm_open(outHandle, device.c_str(), stream, SND_PCM_NONBLOCK);
+			if (err < 0 || !(*outHandle)) {
+				if (err < 0) logAlsaError("snd_pcm_open", err);
+				return Result { Error::DeviceOpenFailed, snd_strerror(err) };
+			}
+
+			snd_pcm_hw_params_t* hw = nullptr;
+			snd_pcm_hw_params_alloca(&hw);
+			err = snd_pcm_hw_params_any(*outHandle, hw);
+			if (err < 0) return failAndClose(outHandle, err, Error::HardwareSetupFailed, "snd_pcm_hw_params_any");
+
+			err = snd_pcm_hw_params_set_access(*outHandle, hw, SND_PCM_ACCESS_MMAP_NONINTERLEAVED);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_hw_params_set_access");
+
+			err = snd_pcm_hw_params_set_format(*outHandle, hw, SND_PCM_FORMAT_FLOAT_LE);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_hw_params_set_format");
+
+			unsigned int sampleRateRequest = sampleRate.load(std::memory_order_acquire);
+			if (sampleRateRequest == 0) sampleRateRequest = 48'000;
+			err = snd_pcm_hw_params_set_rate_near(*outHandle, hw, &sampleRateRequest, nullptr);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_hw_params_set_rate_near");
+
+			snd_pcm_uframes_t periodRequest = blockSize.load(std::memory_order_acquire);
+			if (periodRequest == 0) periodRequest = 256;
+			periodRequest = std::min<snd_pcm_uframes_t>(periodRequest, constants::MAX_BLOCK_SIZE);
+			err = snd_pcm_hw_params_set_period_size_near(*outHandle, hw, &periodRequest, nullptr);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_hw_params_set_period_size_near");
+
+			snd_pcm_uframes_t bufferRequest = periodRequest * 2;
+			err = snd_pcm_hw_params_set_buffer_size_near(*outHandle, hw, &bufferRequest);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_hw_params_set_buffer_size_near");
+
+			const size_t alreadyOpened = channelCount.load(std::memory_order_acquire);
+			unsigned int requestedChannels = static_cast<unsigned int>(std::max<size_t>(alreadyOpened + 1, 2));
+			err = snd_pcm_hw_params_set_channels_near(*outHandle, hw, &requestedChannels);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_hw_params_set_channels_near");
+
+			err = snd_pcm_hw_params(*outHandle, hw);
+			if (err < 0) return failAndClose(outHandle, err, Error::HardwareSetupFailed, "snd_pcm_hw_params");
+
+			unsigned int actualChannels = 0;
+			snd_pcm_hw_params_get_channels(hw, &actualChannels);
+			hardwareChannels = std::min<uint32_t>(actualChannels, constants::MAX_CHANNEL_COUNT);
+
+			snd_pcm_sw_params_t* sw = nullptr;
+			snd_pcm_sw_params_alloca(&sw);
+			err = snd_pcm_sw_params_current(*outHandle, sw);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_sw_params_current");
+
+			// Avail minimum equals one period to avoid wakeups smaller than our
+			// realtime processing quantum.
+			err = snd_pcm_sw_params_set_avail_min(*outHandle, sw, periodRequest);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_sw_params_set_avail_min");
+
+			// Playback starts only when one period is queued, reducing startup xruns.
+			if (stream == SND_PCM_STREAM_PLAYBACK) {
+				err = snd_pcm_sw_params_set_start_threshold(*outHandle, sw, periodRequest);
+			} else {
+				err = snd_pcm_sw_params_set_start_threshold(*outHandle, sw, 1);
+			}
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_sw_params_set_start_threshold");
+
+			err = snd_pcm_sw_params(*outHandle, sw);
+			if (err < 0) return failAndClose(outHandle, err, Error::SetupHardwareParameterFailed, "snd_pcm_sw_params");
+
+			descriptorCount = snd_pcm_poll_descriptors_count(*outHandle);
+			if (descriptorCount < 0) {
+				return failAndClose(outHandle, descriptorCount, Error::PollSetupFailed, "snd_pcm_poll_descriptors_count");
+			}
+
+			refreshPollDescriptors();
+
+			backendSampleRate.store(sampleRateRequest, std::memory_order_release);
+			backendBufferSize.store(static_cast<uint32_t>(periodRequest), std::memory_order_release);
+			if (sampleRate.load(std::memory_order_acquire) == 0) {
+				sampleRate.store(sampleRateRequest, std::memory_order_release);
+			}
+			if (blockSize.load(std::memory_order_acquire) == 0) {
+				blockSize.store(static_cast<uint32_t>(periodRequest), std::memory_order_release);
+			}
+
+			if (stream == SND_PCM_STREAM_PLAYBACK) {
+				playbackDevice = device;
+			} else {
+				captureDevice = device;
+			}
+
+			return Ok;
+		}
+
+		void processCycle() {
+			const uint32_t backendFramesMax = backendBufferSize.load(std::memory_order_acquire);
+			if (backendFramesMax == 0 || backendFramesMax > constants::MAX_BLOCK_SIZE) return;
+
+			const snd_pcm_channel_area_t* outAreas = nullptr;
+			const snd_pcm_channel_area_t* inAreas = nullptr;
+			snd_pcm_uframes_t outOffset = 0;
+			snd_pcm_uframes_t inOffset = 0;
+			snd_pcm_uframes_t outFrames = 0;
+			snd_pcm_uframes_t inFrames = 0;
+
+			bool readyOut = false;
+			bool readyIn = false;
+
+			if (playback) {
+				snd_pcm_sframes_t avail = snd_pcm_avail_update(playback);
+				if (avail < 0) {
+					handleRecoverableXrun(playback, static_cast<int>(avail));
+				} else if (avail > 0) {
+					outFrames = std::min<snd_pcm_uframes_t>(backendFramesMax, static_cast<snd_pcm_uframes_t>(avail));
+					int beginErr = snd_pcm_mmap_begin(playback, &outAreas, &outOffset, &outFrames);
+					if (beginErr < 0) {
+						handleRecoverableXrun(playback, beginErr);
+					} else {
+						readyOut = (outAreas != nullptr && outFrames > 0);
+					}
+				}
+			}
+
+			if (capture) {
+				snd_pcm_sframes_t avail = snd_pcm_avail_update(capture);
+				if (avail < 0) {
+					handleRecoverableXrun(capture, static_cast<int>(avail));
+				} else if (avail > 0) {
+					inFrames = std::min<snd_pcm_uframes_t>(backendFramesMax, static_cast<snd_pcm_uframes_t>(avail));
+					int beginErr = snd_pcm_mmap_begin(capture, &inAreas, &inOffset, &inFrames);
+					if (beginErr < 0) {
+						handleRecoverableXrun(capture, beginErr);
+					} else {
+						readyIn = (inAreas != nullptr && inFrames > 0);
+					}
+				}
+			}
+
+			if (!readyOut && !readyIn) return;
+
+			snd_pcm_uframes_t backendFrames = backendFramesMax;
+			if (readyOut) backendFrames = std::min(backendFrames, outFrames);
+			if (readyIn) backendFrames = std::min(backendFrames, inFrames);
+			if (backendFrames == 0) return;
+
+			Channel* inputChannelViews[constants::MAX_CHANNEL_COUNT] {};
+			Channel* outputChannelViews[constants::MAX_CHANNEL_COUNT] {};
+			AlsaChannelHandle* inputHandles[constants::MAX_CHANNEL_COUNT] {};
+			AlsaChannelHandle* outputHandles[constants::MAX_CHANNEL_COUNT] {};
+
+			size_t inIndex = 0;
+			size_t outIndex = 0;
+
+			const size_t count = channelCount.load(std::memory_order_acquire);
+			for (size_t i = 0; i < count; ++i) {
+				AlsaChannelHandle& ch = openedChannels[i];
+				if (ch.channel.channelInfo.direction == Direction::In) {
+					inputHandles[inIndex] = &ch;
+					inputChannelViews[inIndex++] = &ch.channel;
+				} else {
+					outputHandles[outIndex] = &ch;
+					outputChannelViews[outIndex++] = &ch.channel;
+				}
+			}
+
+			for (size_t i = 0; i < inIndex; ++i) {
+				AlsaChannelHandle* ch = inputHandles[i];
+				if (!ch || !readyIn) continue;
+				if (ch->channelIndex >= captureHardwareChannels) continue;
+				float* ptr = channelPtr(&inAreas[ch->channelIndex], inOffset);
+				if (!ptr) continue;
+
+				realtime::ingestInput(
+					ch->channel,
+					ptr,
+					backendFrames,
+					inputResampleScratch.get(),
+					constants::MAX_FIFO_SIZE
+				);
+			}
+
+			const uint32_t fixedBlockSize = blockSize.load(std::memory_order_acquire);
+			const size_t iterations = realtime::computeCallbackIterations(
+				std::span<Channel*>(inputChannelViews, inIndex),
+				std::span<Channel*>(outputChannelViews, outIndex),
+				backendFrames,
+				fixedBlockSize
+			);
+
+			if (callback && fixedBlockSize > 0 && fixedBlockSize <= constants::MAX_BLOCK_SIZE) {
+				realtime::runEngine(
+					callback,
+					sampleRate.load(std::memory_order_acquire),
+					fixedBlockSize,
+					std::span<Channel*>(inputChannelViews, inIndex),
+					std::span<Channel*>(outputChannelViews, outIndex),
+					inputBlockStorage.get(),
+					outputBlockStorage.get(),
+					iterations
+				);
+			}
+
+			for (size_t i = 0; i < outIndex; ++i) {
+				AlsaChannelHandle* ch = outputHandles[i];
+				if (!ch || !readyOut) continue;
+				if (ch->channelIndex >= playbackHardwareChannels) continue;
+				float* ptr = channelPtr(&outAreas[ch->channelIndex], outOffset);
+				if (!ptr) continue;
+
+				const size_t missing = realtime::renderOutput(
+					ch->channel,
+					ptr,
+					backendFrames,
+					outputResampleScratch.get(),
+					constants::MAX_FIFO_SIZE
+				);
+
+				if (missing > 0) {
+					underrunCount.fetch_add(1, std::memory_order_relaxed);
+					outputMissingFrames.fetch_add(missing, std::memory_order_relaxed);
+				}
+			}
+
+			if (readyOut) {
+				snd_pcm_sframes_t committed = snd_pcm_mmap_commit(playback, outOffset, backendFrames);
+				if (committed < 0) {
+					handleRecoverableXrun(playback, static_cast<int>(committed));
+				}
+			}
+			if (readyIn) {
+				snd_pcm_sframes_t committed = snd_pcm_mmap_commit(capture, inOffset, backendFrames);
+				if (committed < 0) {
+					handleRecoverableXrun(capture, static_cast<int>(committed));
+				}
+			}
+		}
+
+		void handleRecoverableXrun(snd_pcm_t* handle, int errCode = -EPIPE) {
+			if (!handle) return;
+			const int recoverErr = snd_pcm_recover(handle, errCode, 1);
+			if (recoverErr < 0) {
+				logAlsaError("snd_pcm_recover", recoverErr);
+			}
+			xrunCount.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		void refreshPollDescriptors() {
+			const size_t total = static_cast<size_t>(std::max(playbackDescriptorCount, 0) + std::max(captureDescriptorCount, 0));
+			pollDescriptors.assign(total, pollfd {});
+
+			if (playback && playbackDescriptorCount > 0) {
+				snd_pcm_poll_descriptors(playback, pollDescriptors.data(), playbackDescriptorCount);
+			}
+			if (capture && captureDescriptorCount > 0) {
+				snd_pcm_poll_descriptors(capture, pollDescriptors.data() + playbackDescriptorCount, captureDescriptorCount);
+			}
+		}
+
+		Result failAndClose(snd_pcm_t** handle, int err, Error error, const char* what) {
+			logAlsaError(what, err);
+			if (*handle) {
+				snd_pcm_close(*handle);
+				*handle = nullptr;
+			}
+			return Result { error, snd_strerror(err) };
+		}
 
 	private:
+		snd_pcm_t* playback = nullptr;
+		snd_pcm_t* capture = nullptr;
 
-		snd_pcm_t*			playback = nullptr;
-		snd_pcm_t*			capture	 = nullptr;
+		std::string playbackDevice;
+		std::string captureDevice;
 
-		std::vector<pollfd>	pfds;
-		std::vector<float*>	outPtrs;
-		std::vector<float*>	inPtrs;
+		std::thread worker;
+		std::atomic<bool> workerStop = false;
 
-		int					outCount = 0;
-		int					inCount	 = 0;	
+		std::vector<pollfd> pollDescriptors;
+		int playbackDescriptorCount = 0;
+		int captureDescriptorCount = 0;
+
+		std::unique_ptr<AlsaChannelHandle[]> openedChannels;
+		std::unique_ptr<float[]> inputBlockStorage;
+		std::unique_ptr<float[]> outputBlockStorage;
+		std::unique_ptr<float[]> inputResampleScratch;
+		std::unique_ptr<float[]> outputResampleScratch;
+
+		std::atomic<size_t> channelCount = 0;
+		std::atomic<size_t> inputCount = 0;
+		std::atomic<size_t> outputCount = 0;
+		std::atomic<uint32_t> backendSampleRate = 0;
+		std::atomic<uint32_t> backendBufferSize = 0;
+		std::atomic<size_t> xrunCount = 0;
+		std::atomic<size_t> underrunCount = 0;
+		std::atomic<size_t> outputMissingFrames = 0;
+
+		uint32_t playbackHardwareChannels = 0;
+		uint32_t captureHardwareChannels = 0;
 	};
 }
