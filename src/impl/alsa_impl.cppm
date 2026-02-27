@@ -38,17 +38,26 @@ namespace mka::audio {
 			uint32_t channelIndex = 0;
 		};
 
+		struct EnumeratedDevice {
+			std::string deviceId;
+			uint32_t outputChannels = 0;
+			uint32_t inputChannels = 0;
+		};
+
 		bool parseChannelName(std::string_view name, ParsedChannelName& out) {
-			const size_t firstSep = name.find(':');
-			if (firstSep == std::string_view::npos) return false;
-			const size_t secondSep = name.find(':', firstSep + 1);
-			if (secondSep == std::string_view::npos) return false;
+			// Encoding format is: <device>#<in|out>#<channel-index>
+			// We use '#' as separator because ALSA device names naturally contain ':'
+			// (example: hw:0,0), so ':' cannot be used safely for parsing.
+			const size_t rightSep = name.rfind('#');
+			if (rightSep == std::string_view::npos) return false;
+			const size_t leftSep = name.rfind('#', rightSep - 1);
+			if (leftSep == std::string_view::npos) return false;
 
-			const std::string_view deviceView = name.substr(0, firstSep);
-			const std::string_view streamView = name.substr(firstSep + 1, secondSep - firstSep - 1);
-			const std::string_view indexView = name.substr(secondSep + 1);
+			const std::string_view deviceView = name.substr(0, leftSep);
+			const std::string_view streamView = name.substr(leftSep + 1, rightSep - leftSep - 1);
+			const std::string_view indexView = name.substr(rightSep + 1);
 
-			if (deviceView.empty() || indexView.empty()) return false;
+			if (deviceView.empty() || streamView.empty() || indexView.empty()) return false;
 
 			char* end = nullptr;
 			const unsigned long parsed = std::strtoul(std::string(indexView).c_str(), &end, 10);
@@ -72,9 +81,7 @@ namespace mka::audio {
 		uint32_t queryMaxChannels(const char* device, snd_pcm_stream_t stream) {
 			snd_pcm_t* handle = nullptr;
 			const int openErr = snd_pcm_open(&handle, device, stream, SND_PCM_NONBLOCK);
-			if (openErr < 0 || !handle) {
-				return 0;
-			}
+			if (openErr < 0 || !handle) return 0;
 
 			snd_pcm_hw_params_t* hw = nullptr;
 			snd_pcm_hw_params_alloca(&hw);
@@ -90,8 +97,62 @@ namespace mka::audio {
 			}
 
 			snd_pcm_close(handle);
+			// Some ALSA plugins report absurdly high theoretical channel counts.
+			// Clamp to a DAW-friendly practical ceiling to avoid fake endpoints.
 			if (maxChannels == 0) return 0;
-			return std::min<uint32_t>(maxChannels, constants::MAX_CHANNEL_COUNT);
+			return std::min<uint32_t>(maxChannels, 32);
+		}
+
+		std::vector<EnumeratedDevice> enumeratePcmDevices() {
+			std::vector<EnumeratedDevice> devices;
+
+			int card = -1;
+			if (snd_card_next(&card) < 0) {
+				return devices;
+			}
+
+			while (card >= 0) {
+				char cardName[32] {};
+				std::snprintf(cardName, sizeof(cardName), "hw:%d", card);
+
+				snd_ctl_t* ctl = nullptr;
+				if (snd_ctl_open(&ctl, cardName, 0) >= 0 && ctl) {
+					int dev = -1;
+					while (true) {
+						if (snd_ctl_pcm_next_device(ctl, &dev) < 0 || dev < 0) break;
+
+						char devId[32] {};
+						std::snprintf(devId, sizeof(devId), "hw:%d,%d", card, dev);
+
+						const uint32_t outCh = queryMaxChannels(devId, SND_PCM_STREAM_PLAYBACK);
+						const uint32_t inCh = queryMaxChannels(devId, SND_PCM_STREAM_CAPTURE);
+
+						if (outCh > 0 || inCh > 0) {
+							devices.push_back(EnumeratedDevice {
+								.deviceId = devId,
+								.outputChannels = outCh,
+								.inputChannels = inCh
+							});
+						}
+					}
+					snd_ctl_close(ctl);
+				}
+				snd_card_next(&card);
+			}
+
+			if (devices.empty()) {
+				const uint32_t fallbackOut = queryMaxChannels("default", SND_PCM_STREAM_PLAYBACK);
+				const uint32_t fallbackIn = queryMaxChannels("default", SND_PCM_STREAM_CAPTURE);
+				if (fallbackOut > 0 || fallbackIn > 0) {
+					devices.push_back(EnumeratedDevice {
+						.deviceId = "default",
+						.outputChannels = fallbackOut,
+						.inputChannels = fallbackIn
+					});
+				}
+			}
+
+			return devices;
 		}
 
 		float* channelPtr(const snd_pcm_channel_area_t* area, snd_pcm_uframes_t offset) {
@@ -132,29 +193,29 @@ namespace mka::audio {
 		}
 
 		std::vector<ChannelInfo> getChannels() override {
-			// We expose ALSA channels as: <device>:<in|out>:<index>
-			// This mirrors JACK's per-channel open() workflow while still targeting
-			// ALSA's device-oriented API.
-			constexpr const char* kDefaultDevice = "default";
 			std::vector<ChannelInfo> channels;
+			const std::vector<EnumeratedDevice> devices = enumeratePcmDevices();
 
-			const uint32_t maxOut = queryMaxChannels(kDefaultDevice, SND_PCM_STREAM_PLAYBACK);
-			const uint32_t maxIn = queryMaxChannels(kDefaultDevice, SND_PCM_STREAM_CAPTURE);
-
-			channels.reserve(maxOut + maxIn);
-
-			for (uint32_t i = 0; i < maxOut; ++i) {
-				ChannelInfo info {};
-				std::snprintf(info.name, sizeof(info.name), "%s:out:%u", kDefaultDevice, i);
-				info.direction = Direction::Out;
-				channels.emplace_back(info);
+			size_t total = 0;
+			for (const auto& dev : devices) {
+				total += dev.outputChannels + dev.inputChannels;
 			}
+			channels.reserve(total);
 
-			for (uint32_t i = 0; i < maxIn; ++i) {
-				ChannelInfo info {};
-				std::snprintf(info.name, sizeof(info.name), "%s:in:%u", kDefaultDevice, i);
-				info.direction = Direction::In;
-				channels.emplace_back(info);
+			for (const auto& dev : devices) {
+				for (uint32_t i = 0; i < dev.outputChannels; ++i) {
+					ChannelInfo info {};
+					std::snprintf(info.name, sizeof(info.name), "%s#out#%u", dev.deviceId.c_str(), i);
+					info.direction = Direction::Out;
+					channels.emplace_back(info);
+				}
+
+				for (uint32_t i = 0; i < dev.inputChannels; ++i) {
+					ChannelInfo info {};
+					std::snprintf(info.name, sizeof(info.name), "%s#in#%u", dev.deviceId.c_str(), i);
+					info.direction = Direction::In;
+					channels.emplace_back(info);
+				}
 			}
 
 			return channels;
@@ -180,7 +241,7 @@ namespace mka::audio {
 
 			ParsedChannelName parsed {};
 			if (!parseChannelName(channel.name, parsed)) {
-				return Result { Error::GenericError, "Invalid ALSA channel name. Expected <device>:<in|out>:<index>." };
+				return Result { Error::GenericError, "Invalid ALSA channel name. Expected <device>#<in|out>#<index>." };
 			}
 
 			const bool isInput = (channel.direction == Direction::In);
