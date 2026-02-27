@@ -40,8 +40,18 @@ namespace mka::audio {
 
 		struct EnumeratedDevice {
 			std::string deviceId;
+			std::string cardLabel;
+			std::string playbackLabel;
+			std::string captureLabel;
 			uint32_t outputChannels = 0;
 			uint32_t inputChannels = 0;
+		};
+
+		struct EnumeratedChannel {
+			ChannelInfo channelInfo {};
+			std::string deviceId;
+			snd_pcm_stream_t stream = SND_PCM_STREAM_PLAYBACK;
+			uint32_t channelIndex = 0;
 		};
 
 		bool parseChannelName(std::string_view name, ParsedChannelName& out) {
@@ -117,6 +127,16 @@ namespace mka::audio {
 
 				snd_ctl_t* ctl = nullptr;
 				if (snd_ctl_open(&ctl, cardName, 0) >= 0 && ctl) {
+					snd_ctl_card_info_t* cardInfo = nullptr;
+					snd_ctl_card_info_alloca(&cardInfo);
+					std::string cardLabel = cardName;
+					if (snd_ctl_card_info(ctl, cardInfo) >= 0) {
+						const char* cardReadable = snd_ctl_card_info_get_name(cardInfo);
+						if (cardReadable && cardReadable[0] != '\0') {
+							cardLabel = cardReadable;
+						}
+					}
+
 					int dev = -1;
 					while (true) {
 						if (snd_ctl_pcm_next_device(ctl, &dev) < 0 || dev < 0) break;
@@ -126,17 +146,42 @@ namespace mka::audio {
 
 						const uint32_t outCh = queryMaxChannels(devId, SND_PCM_STREAM_PLAYBACK);
 						const uint32_t inCh = queryMaxChannels(devId, SND_PCM_STREAM_CAPTURE);
-
-						if (outCh > 0 || inCh > 0) {
-							devices.push_back(EnumeratedDevice {
-								.deviceId = devId,
-								.outputChannels = outCh,
-								.inputChannels = inCh
-							});
+						if (outCh == 0 && inCh == 0) {
+							continue;
 						}
+
+						std::string playbackLabel = "Playback";
+						std::string captureLabel = "Capture";
+						snd_pcm_info_t* pcmInfo = nullptr;
+						snd_pcm_info_alloca(&pcmInfo);
+
+						snd_pcm_info_set_device(pcmInfo, dev);
+						snd_pcm_info_set_subdevice(pcmInfo, 0);
+
+						snd_pcm_info_set_stream(pcmInfo, SND_PCM_STREAM_PLAYBACK);
+						if (snd_ctl_pcm_info(ctl, pcmInfo) >= 0) {
+							const char* n = snd_pcm_info_get_name(pcmInfo);
+							if (n && n[0] != '\0') playbackLabel = n;
+						}
+
+						snd_pcm_info_set_stream(pcmInfo, SND_PCM_STREAM_CAPTURE);
+						if (snd_ctl_pcm_info(ctl, pcmInfo) >= 0) {
+							const char* n = snd_pcm_info_get_name(pcmInfo);
+							if (n && n[0] != '\0') captureLabel = n;
+						}
+
+						devices.push_back(EnumeratedDevice {
+							.deviceId = devId,
+							.cardLabel = cardLabel,
+							.playbackLabel = playbackLabel,
+							.captureLabel = captureLabel,
+							.outputChannels = outCh,
+							.inputChannels = inCh
+						});
 					}
 					snd_ctl_close(ctl);
 				}
+
 				snd_card_next(&card);
 			}
 
@@ -146,6 +191,9 @@ namespace mka::audio {
 				if (fallbackOut > 0 || fallbackIn > 0) {
 					devices.push_back(EnumeratedDevice {
 						.deviceId = "default",
+						.cardLabel = "Default ALSA",
+						.playbackLabel = "Default Playback",
+						.captureLabel = "Default Capture",
 						.outputChannels = fallbackOut,
 						.inputChannels = fallbackIn
 					});
@@ -193,28 +241,57 @@ namespace mka::audio {
 		}
 
 		std::vector<ChannelInfo> getChannels() override {
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			std::vector<ChannelInfo> channels;
-			const std::vector<EnumeratedDevice> devices = enumeratePcmDevices();
+			discoveredChannels.clear();
 
+			const std::vector<EnumeratedDevice> devices = enumeratePcmDevices();
 			size_t total = 0;
 			for (const auto& dev : devices) {
 				total += dev.outputChannels + dev.inputChannels;
 			}
 			channels.reserve(total);
+			discoveredChannels.reserve(total);
 
 			for (const auto& dev : devices) {
 				for (uint32_t i = 0; i < dev.outputChannels; ++i) {
-					ChannelInfo info {};
-					std::snprintf(info.name, sizeof(info.name), "%s#out#%u", dev.deviceId.c_str(), i);
-					info.direction = Direction::Out;
-					channels.emplace_back(info);
+					EnumeratedChannel entry {};
+					std::snprintf(
+						entry.channelInfo.name,
+						sizeof(entry.channelInfo.name),
+						"%s | %s | Out %u [%s]",
+						dev.cardLabel.c_str(),
+						dev.playbackLabel.c_str(),
+						i + 1,
+						dev.deviceId.c_str()
+					);
+					entry.channelInfo.direction = Direction::Out;
+					entry.deviceId = dev.deviceId;
+					entry.stream = SND_PCM_STREAM_PLAYBACK;
+					entry.channelIndex = i;
+
+					discoveredChannels.push_back(entry);
+					channels.push_back(entry.channelInfo);
 				}
 
 				for (uint32_t i = 0; i < dev.inputChannels; ++i) {
-					ChannelInfo info {};
-					std::snprintf(info.name, sizeof(info.name), "%s#in#%u", dev.deviceId.c_str(), i);
-					info.direction = Direction::In;
-					channels.emplace_back(info);
+					EnumeratedChannel entry {};
+					std::snprintf(
+						entry.channelInfo.name,
+						sizeof(entry.channelInfo.name),
+						"%s | %s | In %u [%s]",
+						dev.cardLabel.c_str(),
+						dev.captureLabel.c_str(),
+						i + 1,
+						dev.deviceId.c_str()
+					);
+					entry.channelInfo.direction = Direction::In;
+					entry.deviceId = dev.deviceId;
+					entry.stream = SND_PCM_STREAM_CAPTURE;
+					entry.channelIndex = i;
+
+					discoveredChannels.push_back(entry);
+					channels.push_back(entry.channelInfo);
 				}
 			}
 
@@ -240,8 +317,20 @@ namespace mka::audio {
 			}
 
 			ParsedChannelName parsed {};
-			if (!parseChannelName(channel.name, parsed)) {
-				return Result { Error::GenericError, "Invalid ALSA channel name. Expected <device>#<in|out>#<index>." };
+			bool parsedFromCache = false;
+			for (const auto& entry : discoveredChannels) {
+				if (std::strcmp(entry.channelInfo.name, channel.name) == 0
+					&& entry.channelInfo.direction == channel.direction) {
+					parsed.device = entry.deviceId;
+					parsed.stream = entry.stream;
+					parsed.channelIndex = entry.channelIndex;
+					parsedFromCache = true;
+					break;
+				}
+			}
+
+			if (!parsedFromCache && !parseChannelName(channel.name, parsed)) {
+				return Result { Error::GenericError, "Invalid ALSA channel name." };
 			}
 
 			const bool isInput = (channel.direction == Direction::In);
@@ -702,6 +791,7 @@ namespace mka::audio {
 		std::atomic<bool> workerStop = false;
 
 		std::vector<pollfd> pollDescriptors;
+		std::vector<EnumeratedChannel> discoveredChannels;
 		int playbackDescriptorCount = 0;
 		int captureDescriptorCount = 0;
 
