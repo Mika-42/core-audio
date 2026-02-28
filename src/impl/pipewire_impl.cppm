@@ -12,6 +12,7 @@ module;
 #include <span>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 export module audio.pipewire;
@@ -28,7 +29,6 @@ import audio.realtime_pipeline;
 #include <spa/utils/defs.h>
 #include <spa/utils/result.h>
 
-
 namespace mka::audio {
 
 	struct DiscoveredChannel {
@@ -36,6 +36,7 @@ namespace mka::audio {
 		uint32_t nodeId = SPA_ID_INVALID;
 		uint32_t portId = SPA_ID_INVALID;
 		uint32_t channelIndex = 0;
+		char portName[96] {};
 	};
 
 	struct PipeWireChannelHandle {
@@ -256,6 +257,52 @@ namespace mka::audio {
 		void run() override {}
 
 	private:
+		static Direction parseDirectionFromPort(const char* directionText) {
+			if (!directionText) {
+				return Direction::In;
+			}
+
+			// PipeWire reports directions relative to the node. We intentionally
+			// invert this to expose user-facing semantics:
+			// - sound leaving our engine  => Output
+			// - sound entering our engine => Input
+			if (std::strcmp(directionText, "in") == 0 || std::strcmp(directionText, "input") == 0) {
+				return Direction::Out;
+			}
+
+			if (std::strcmp(directionText, "out") == 0 || std::strcmp(directionText, "output") == 0) {
+				return Direction::In;
+			}
+
+			// Fallback conservatif: traiter comme un input logique.
+			return Direction::In;
+		}
+
+		std::string getNodeDisplayNameNoLock(uint32_t nodeId) const {
+			auto it = nodeNames.find(nodeId);
+			if (it != nodeNames.end() && !it->second.empty()) {
+				return it->second;
+			}
+			return std::string { "node-" } + std::to_string(nodeId);
+		}
+
+		void refreshDiscoveredChannelNamesNoLock(uint32_t nodeId) {
+			const std::string nodeLabel = getNodeDisplayNameNoLock(nodeId);
+			for (auto& discovered : discoveredChannels) {
+				if (discovered.nodeId != nodeId) {
+					continue;
+				}
+
+				std::snprintf(
+					discovered.channelInfo.name,
+					sizeof(discovered.channelInfo.name),
+					"%s:%s",
+					nodeLabel.c_str(),
+					discovered.portName
+				);
+			}
+		}
+
 		static void onCoreDone(void*, uint32_t, int) {}
 
 		static void onRegistryGlobal(void* data,
@@ -267,11 +314,32 @@ namespace mka::audio {
 			auto* engine = static_cast<PipeWire*>(data);
 			if (!engine || !props || !type) return;
 
+			std::lock_guard<std::mutex> lock(engine->lifecycleMutex);
+			
 			if (std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0) {
+			if (std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) {
+					return;
+				}
+
+				const char* nick = spa_dict_lookup(props, PW_KEY_NODE_NICK);
+				const char* description = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
+				const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+
+				const char* nodeLabel = nullptr;
+				if (description && *description != '\0') {
+					nodeLabel = description;
+				} else if (nick && *nick != '\0') {
+					nodeLabel = nick;
+				} else if (name && *name != '\0') {
+					nodeLabel = name;
+				}
+
+				if (nodeLabel) {
+					engine->nodeNames[id] = nodeLabel;
+					engine->refreshDiscoveredChannelNamesNoLock(id);
+				}
 				return;
 			}
-
-			std::lock_guard<std::mutex> lock(engine->lifecycleMutex);
 
 			const char* nodeIdText = spa_dict_lookup(props, PW_KEY_NODE_ID);
 			const char* directionText = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
@@ -285,7 +353,8 @@ namespace mka::audio {
 			const unsigned long parsedNode = std::strtoul(nodeIdText, &end, 10);
 			if (!end || *end != '\0') return;
 
-			const Direction direction = (std::strcmp(directionText, "in") == 0) ? Direction::Out : Direction::In;
+			const Direction direction = parseDirectionFromPort(directionText);
+
 			uint32_t channelIndex = 0;
 			if (channelText) {
 				channelIndex = static_cast<uint32_t>(std::hash<std::string_view>{}(channelText) & 0xFFFFu);
@@ -295,13 +364,17 @@ namespace mka::audio {
 			discovered.nodeId = static_cast<uint32_t>(parsedNode);
 			discovered.portId = id;
 			discovered.channelIndex = channelIndex;
+			
+			std::snprintf(discovered.portName, sizeof(discovered.portName), "%s", portName);
+
+			const std::string nodeLabel = engine->getNodeDisplayNameNoLock(discovered.nodeId);
+			
 			std::snprintf(
 				discovered.channelInfo.name,
 				sizeof(discovered.channelInfo.name),
-				"pw:%u:%u:%s",
-				discovered.nodeId,
-				discovered.portId,
-				portName
+				"%s:%s",
+				nodeLabel.c_str(),
+				discovered.portName
 			);
 			discovered.channelInfo.direction = direction;
 
@@ -600,6 +673,7 @@ namespace mka::audio {
 
 		std::unique_ptr<PipeWireChannelHandle[]> openedChannels;
 		std::vector<DiscoveredChannel> discoveredChannels;
+		std::unordered_map<uint32_t, std::string> nodeNames;
 		OpenedNodeCache openedNodeCache;
 		std::unique_ptr<float[]> inputBlockStorage;
 		std::unique_ptr<float[]> outputBlockStorage;
