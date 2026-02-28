@@ -5,6 +5,7 @@ export namespace mka::audio {
 	enum class Error {
 		None,
 	   	GenericError,
+		DeviceNotFound,
 		DeviceOpenFailed,
 		SetupHardwareParameterFailed,
 		PollSetupFailed,

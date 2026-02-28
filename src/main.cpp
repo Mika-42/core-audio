@@ -4,7 +4,7 @@
 #include <numbers>
 #include <print>
 
-import audio.alsa;
+import audio.pipewire;
 
 void audio_callback(mka::audio::Block& block) {
 	static float phase = 0.0f;
@@ -26,7 +26,7 @@ void audio_callback(mka::audio::Block& block) {
 }
 
 int main() {
-	mka::audio::ALSA engine;
+	mka::audio::PipeWire engine;
 
 	auto channels = engine.getChannels();
 	if (channels.empty()) {

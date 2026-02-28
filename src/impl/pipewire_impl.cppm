@@ -1,11 +1,5 @@
 module;
 
-#include <pipewire/pipewire.h>
-#include <spa/param/audio/format-utils.h>
-#include <spa/param/props.h>
-#include <spa/utils/defs.h>
-#include <spa/utils/result.h>
-
 #include <algorithm>
 #include <chrono>
 #include <atomic>
@@ -28,23 +22,28 @@ import audio.abstract_core;
 import audio.constants;
 import audio.realtime_pipeline;
 
+#include <pipewire/pipewire.h>
+#include <spa/param/audio/format-utils.h>
+#include <spa/param/props.h>
+#include <spa/utils/defs.h>
+#include <spa/utils/result.h>
+
+
 namespace mka::audio {
 
-	namespace {
-		struct DiscoveredChannel {
-			ChannelInfo channelInfo {};
-			uint32_t nodeId = SPA_ID_INVALID;
-			uint32_t portId = SPA_ID_INVALID;
-			uint32_t channelIndex = 0;
-		};
+	struct DiscoveredChannel {
+		ChannelInfo channelInfo {};
+		uint32_t nodeId = SPA_ID_INVALID;
+		uint32_t portId = SPA_ID_INVALID;
+		uint32_t channelIndex = 0;
+	};
 
-		struct PipeWireChannelHandle {
-			Channel channel {};
-			uint32_t nodeId = SPA_ID_INVALID;
-			uint32_t portId = SPA_ID_INVALID;
-			uint32_t channelIndex = 0;
-		};
-	}
+	struct PipeWireChannelHandle {
+		Channel channel {};
+		uint32_t nodeId = SPA_ID_INVALID;
+		uint32_t portId = SPA_ID_INVALID;
+		uint32_t channelIndex = 0;
+	};
 
 	export class PipeWire final : public AbstractCoreAudio {
 	public:
