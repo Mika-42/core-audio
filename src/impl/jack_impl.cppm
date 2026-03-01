@@ -1,6 +1,7 @@
 module;
 
 #include <jack/jack.h>
+#include <jack/midiport.h>
 
 #include <algorithm>
 #include <atomic>
@@ -28,6 +29,7 @@ namespace mka::audio {
 	int processCallback(jack_nframes_t nframes, void* arg);
 	int xrunCallback(void* arg);
 	void shutdownCallback(void* arg);
+	void connectPhysicalMidiInputs(jack_client_t* client, jack_port_t* midiInputPort);
 
 	struct JackChannelHandle {
 		Channel			channel;
@@ -70,6 +72,14 @@ namespace mka::audio {
 			jackBufferSize.store(_jackBufferSize);
 			sampleRate.store(_jackSampleRate);
 			blockSize.store(_jackBufferSize);
+
+			midiInputPort = jack_port_register(
+				client,
+				"midi_input",
+				JACK_DEFAULT_MIDI_TYPE,
+				JackPortIsInput,
+				0
+			);
 			
 			state.store(State::Stopped);
 		}
@@ -199,6 +209,7 @@ namespace mka::audio {
 			state.store(State::Starting);
 
 			if (jack_activate(client) == 0) {
+				connectPhysicalMidiInputs(client, midiInputPort);
 				state.store(State::Running);
 				return;
 			}
@@ -273,6 +284,7 @@ namespace mka::audio {
 		friend void shutdownCallback(void* arg);
 
 		jack_client_t* client = nullptr;
+		jack_port_t* midiInputPort = nullptr;
 		std::unique_ptr<JackChannelHandle[]> openedChannels;
 		std::unique_ptr<float[]> inputBlockStorage;
 		std::unique_ptr<float[]> outputBlockStorage;
@@ -290,6 +302,8 @@ namespace mka::audio {
 		std::atomic<size_t>		xrunCount			= 0;
 		std::atomic<size_t>		underrunCount		= 0;
 		std::atomic<size_t>		outputMissingFrames	= 0;
+		MidiEvent			midiCycleEvents[MAX_MIDI_EVENTS_PER_BLOCK] {};
+		MidiEvent			midiBlockScratch[MAX_MIDI_EVENTS_PER_BLOCK] {};
 	};
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
@@ -323,6 +337,31 @@ namespace mka::audio {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->xrunCount.fetch_add(1);
 		return 0;
+	}
+
+
+	void connectPhysicalMidiInputs(jack_client_t* client, jack_port_t* midiInputPort) {
+		if (!client || !midiInputPort) {
+			return;
+		}
+
+		const char** ports = jack_get_ports(
+			client,
+			nullptr,
+			JACK_DEFAULT_MIDI_TYPE,
+			JackPortIsOutput | JackPortIsPhysical
+		);
+
+		if (!ports) {
+			return;
+		}
+
+		const char* destination = jack_port_name(midiInputPort);
+		for (size_t i = 0; ports[i] != nullptr; ++i) {
+			jack_connect(client, ports[i], destination);
+		}
+
+		jack_free(ports);
 	}
 
 	int processCallback(jack_nframes_t nframes, void* arg) {
@@ -398,12 +437,46 @@ namespace mka::audio {
 			fixedBlockSize
 		);
 
+		MidiEventBlock midiCycleBlock {};
+		midiCycleBlock.frameCount = nframes;
+		midiCycleBlock.events = engine->midiCycleEvents;
+
+		// Collect MIDI directly from JACK in the realtime callback without heap allocation.
+
+		if (engine->midiInputPort) {
+			void* midiBuffer = jack_port_get_buffer(engine->midiInputPort, nframes);
+			if (midiBuffer) {
+				const uint32_t rawEventCount = jack_midi_get_event_count(midiBuffer);
+				const uint32_t maxEventCount = std::min(rawEventCount, MAX_MIDI_EVENTS_PER_BLOCK);
+
+				for (uint32_t eventIndex = 0; eventIndex < maxEventCount; ++eventIndex) {
+					jack_midi_event_t jackEvent {};
+					if (jack_midi_event_get(&jackEvent, midiBuffer, eventIndex) != 0 || !jackEvent.buffer) {
+						continue;
+					}
+
+					MidiEvent& destination = engine->midiCycleEvents[midiCycleBlock.eventCount++];
+					// JACK timestamps are expressed in backend-frame units for the current cycle.
+					destination.frameOffset = jackEvent.time;
+					destination.source = 0;
+					destination.size = static_cast<uint8_t>(std::min<size_t>(jackEvent.size, MAX_MIDI_EVENT_SIZE));
+					destination.truncated = jackEvent.size > MAX_MIDI_EVENT_SIZE;
+
+					std::memset(destination.data, 0, MAX_MIDI_EVENT_SIZE);
+					std::memcpy(destination.data, jackEvent.buffer, destination.size);
+				}
+			}
+		}
+
 		realtime::runEngine(
 			engine->callback,
 			engineSampleRate,
 			fixedBlockSize,
 			std::span<Channel*>(inputChannelViews, inputCount),
 			std::span<Channel*>(outputChannelViews, outputCount),
+			midiCycleBlock,
+			engine->midiBlockScratch,
+			MAX_MIDI_EVENTS_PER_BLOCK,
 			engine->inputBlockStorage.get(),
 			engine->outputBlockStorage.get(),
 			processIt

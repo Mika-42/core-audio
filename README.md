@@ -92,10 +92,23 @@ simple_tone_generator example :
 
 import audio.jack;
 
-void audio_callback(mka::audio::Block& block) {
+void audio_callback(mka::audio::Block& block, const mka::audio::MidiEventBlock& midiEvents) {
 	static float phase = {};
 	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
 	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
+
+	// MIDI events are already aligned to the current audio block.
+	for (uint32_t eventIndex = 0; eventIndex < midiEvents.eventCount; ++eventIndex) {
+		const auto& event = midiEvents.events[eventIndex];
+		// Example: simple NOTE ON diagnostic (status 0x90, velocity > 0).
+		if (event.size >= 3 && (event.data[0] & 0xF0) == 0x90 && event.data[2] > 0) {
+			std::println("MIDI note on ch={} note={} vel={} frame={}",
+				(event.data[0] & 0x0F) + 1,
+				event.data[1],
+				event.data[2],
+				event.frameOffset);
+		}
+	}
 
 	for(uint32_t i = 0; i < block.blockSize; ++i) {
 		float sample = sinf(phase);

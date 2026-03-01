@@ -126,6 +126,9 @@ export namespace mka::audio::realtime {
 		uint32_t blockSize,
 		std::span<Channel*> inputChannels,
 		std::span<Channel*> outputChannels,
+		const MidiEventBlock& midiCycleEvents,
+		MidiEvent* midiScratch,
+		size_t midiScratchCapacity,
 		float* inputStorage,
 		float* outputStorage,
 		size_t iterations) {
@@ -149,6 +152,32 @@ export namespace mka::audio::realtime {
 		}
 
 		for (size_t it = 0; it < iterations; ++it) {
+			MidiEventBlock midiBlock {};
+			midiBlock.frameCount = blockSize;
+			midiBlock.events = midiScratch;
+
+			if (midiScratch && midiCycleEvents.events && midiScratchCapacity > 0 && midiCycleEvents.eventCount > 0) {
+				const uint32_t blockStart = static_cast<uint32_t>(it * blockSize);
+				const uint32_t blockEnd = blockStart + blockSize;
+
+				// Re-slice cycle MIDI events into the current fixed engine block window.
+				for (uint32_t eventIndex = 0; eventIndex < midiCycleEvents.eventCount; ++eventIndex) {
+					const MidiEvent& source = midiCycleEvents.events[eventIndex];
+
+					if (source.frameOffset < blockStart || source.frameOffset >= blockEnd) {
+						continue;
+					}
+
+					if (midiBlock.eventCount >= midiScratchCapacity) {
+						break;
+					}
+
+					MidiEvent& destination = midiScratch[midiBlock.eventCount++];
+					destination = source;
+					destination.frameOffset -= blockStart;
+				}
+			}
+
 			for (size_t i = 0; i < inputChannels.size(); ++i) {
 				Channel* input = inputChannels[i];
 				if (!input) continue;
@@ -159,7 +188,7 @@ export namespace mka::audio::realtime {
 				std::memset(block.outputs[i], 0, sizeof(float) * blockSize);
 			}
 
-			callback(block);
+			callback(block, midiBlock);
 
 			for (size_t i = 0; i < outputChannels.size(); ++i) {
 				Channel* output = outputChannels[i];
