@@ -1,7 +1,6 @@
 module;
 
 #include <jack/jack.h>
-#include <jack/midiport.h>
 
 #include <algorithm>
 #include <atomic>
@@ -22,6 +21,23 @@ import audio.realtime_pipeline;
 import audio.abstract_core;
 
 namespace mka::audio {
+	// NOTE: including <jack/midiport.h> inside this C++20 module currently
+	// triggers a libstdc++ linkage conflict with GCC modules on some setups.
+	// We declare the tiny JACK MIDI surface we need here to keep the backend
+	// realtime-safe and build-stable.
+	extern "C" {
+		typedef unsigned char jack_midi_data_t;
+		typedef struct {
+			jack_nframes_t time;
+			size_t size;
+			jack_midi_data_t* buffer;
+		} jack_midi_event_t;
+
+		uint32_t jack_midi_get_event_count(void* port_buffer);
+		int jack_midi_event_get(jack_midi_event_t* event, void* port_buffer, uint32_t event_index);
+	}
+
+	constexpr const char* JACK_MIDI_TYPE = "8 bit raw midi";
 	
 	// JACK callbacks
 	int sampleRateCallback(jack_nframes_t nframes, void* arg);
@@ -76,7 +92,7 @@ namespace mka::audio {
 			midiInputPort = jack_port_register(
 				client,
 				"midi_input",
-				JACK_DEFAULT_MIDI_TYPE,
+				JACK_MIDI_TYPE,
 				JackPortIsInput,
 				0
 			);
@@ -348,7 +364,7 @@ namespace mka::audio {
 		const char** ports = jack_get_ports(
 			client,
 			nullptr,
-			JACK_DEFAULT_MIDI_TYPE,
+			JACK_MIDI_TYPE,
 			JackPortIsOutput | JackPortIsPhysical
 		);
 
