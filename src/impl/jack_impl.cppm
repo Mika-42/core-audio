@@ -1,6 +1,7 @@
 module;
 
 #include <jack/jack.h>
+#include <jack/midiport.h>
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,7 @@ export import audio.config;
 export import audio.error;
 import audio.constants;
 import audio.realtime_pipeline;
+import audio.midi_timeline;
 import audio.abstract_core;
 
 namespace mka::audio {
@@ -60,6 +62,14 @@ namespace mka::audio {
 			jack_set_process_callback(client, processCallback, this);
 			jack_set_sample_rate_callback(client, sampleRateCallback, this);
 			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
+
+			midiInputPort = jack_port_register(
+				client,
+				"midi_in",
+				JACK_DEFAULT_MIDI_TYPE,
+				JackPortIsInput,
+				0
+			);
 
 			// setting JACK API value
 			const uint32_t _jackSampleRate = jack_get_sample_rate(client);
@@ -246,6 +256,11 @@ namespace mka::audio {
 				inputCount.store(0);
 				outputCount.store(0);
 
+				if (midiInputPort) {
+					jack_port_unregister(client, midiInputPort);
+					midiInputPort = nullptr;
+				}
+
 				jack_client_close(client);
 				client = nullptr;
 				state.store(State::Closed);
@@ -263,6 +278,9 @@ namespace mka::audio {
 			state.store(State::Stopping);
 			jack_deactivate(client);
 			state.store(State::Stopped);
+			midiQueue.head = 0;
+			midiQueue.count = 0;
+			midiTimeline.reset();
 		}
 
 	private:
@@ -278,6 +296,10 @@ namespace mka::audio {
 		std::unique_ptr<float[]> outputBlockStorage;
 		std::unique_ptr<float[]> inputResampleScratch;
 		std::unique_ptr<float[]> outputResampleScratch;
+		jack_port_t* midiInputPort = nullptr;
+		midi::Queue midiQueue {};
+		mka::midi::EventView midiEventViews[constants::MAX_MIDI_EVENTS_PER_BLOCK] {};
+		midi::FrameAlignState midiTimeline {};
 
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
@@ -318,6 +340,7 @@ namespace mka::audio {
 		auto* engine = static_cast<JACK*>(arg);
 		engine->state.store(State::Stopped);
 	}
+
 
 	int xrunCallback(void* arg) {
 		auto* engine = static_cast<JACK*>(arg);
@@ -375,6 +398,26 @@ namespace mka::audio {
 			return 0;
 		}
 
+		const uint32_t backendSampleRate = engine->jackSampleRate.load(std::memory_order_acquire);
+		if (engine->midiInputPort) {
+			void* midiBuffer = jack_port_get_buffer(engine->midiInputPort, nframes);
+			if (midiBuffer) {
+				const uint32_t eventCount = jack_midi_get_event_count(midiBuffer);
+				for (uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex) {
+					jack_midi_event_t event {};
+					if (jack_midi_event_get(&event, midiBuffer, eventIndex) != 0 || !event.buffer || event.size == 0) {
+						continue;
+					}
+
+					// Convert JACK frame timestamp to engine frame timeline so MIDI can be
+					// sliced per callback block even if backend and engine rates differ.
+					const uint64_t frameOffset = midi::backendFrameToEngineFrame(event.time, backendSampleRate, engineSampleRate);
+					const uint64_t absoluteFrame = engine->midiTimeline.absoluteEngineFrame + frameOffset;
+					midi::pushEvent(engine->midiQueue, absoluteFrame, event.buffer, event.size);
+				}
+			}
+		}
+
 		for (i = 0; i < inputCount; ++i) {
 			auto* ch = inputChannels[i];
 			if(!ch || !ch->port) continue;
@@ -406,7 +449,11 @@ namespace mka::audio {
 			std::span<Channel*>(outputChannelViews, outputCount),
 			engine->inputBlockStorage.get(),
 			engine->outputBlockStorage.get(),
-			processIt
+			processIt,
+			engine->midiQueue,
+			engine->midiEventViews,
+			constants::MAX_MIDI_EVENTS_PER_BLOCK,
+			engine->midiTimeline.absoluteEngineFrame
 		);
 
 		for (i = 0; i < outputCount; ++i) {
@@ -431,6 +478,13 @@ namespace mka::audio {
 				engine->outputMissingFrames.fetch_add(missingFrames, std::memory_order_relaxed);
 			}
 		}
+
+		midi::advanceEngineTimeline(
+			engine->midiTimeline,
+			static_cast<uint64_t>(nframes),
+			backendSampleRate,
+			engineSampleRate
+		);
 
 		return 0;
 	}

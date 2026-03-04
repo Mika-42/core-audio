@@ -5,12 +5,13 @@
 
 import audio.jack;
 
-void audio_callback(mka::audio::Block& block) {
+void audio_callback(mka::audio::Block& audioBlock, const mka::midi::Block& midiBlock) {
+	(void)midiBlock;
 	static float phase = {};
 	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
-	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
+	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(audioBlock.sampleRate);
 
-	for(uint32_t i = 0; i < block.blockSize; ++i) {
+	for(uint32_t i = 0; i < audioBlock.blockSize; ++i) {
 		float sample = sinf(phase);
 
 		phase += phaseIncrement;
@@ -18,8 +19,8 @@ void audio_callback(mka::audio::Block& block) {
 			phase -= twoPi;
 		}
 
-		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
-			block.outputs[ch][i] = sample;
+		for(uint32_t ch = 0; ch < audioBlock.outputCount; ++ch) {
+			audioBlock.outputs[ch][i] = sample;
 		}
 	}
 }

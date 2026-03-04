@@ -10,4 +10,7 @@ export namespace mka::audio::constants {
 	inline constexpr size_t MAX_BLOCK_SIZE			= 8192;	//2^13
 	inline constexpr size_t MAX_FIFO_SIZE			= MAX_BLOCK_COUNT * MAX_BLOCK_SIZE; //2^17
 	inline constexpr size_t MAX_STATIC_BUFFER_SIZE	= MAX_CHANNEL_COUNT * MAX_BLOCK_SIZE;
+	inline constexpr size_t MAX_MIDI_EVENTS_PER_BLOCK = 256;
+	inline constexpr size_t MAX_MIDI_EVENT_DATA_SIZE = 64;
+	inline constexpr size_t MAX_PENDING_MIDI_EVENTS = 2048;
 }

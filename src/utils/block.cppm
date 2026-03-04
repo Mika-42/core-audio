@@ -5,6 +5,7 @@ module;
 
 export module audio.block;
 import audio.constants;
+export import audio.midi_block;
 
 export namespace mka::audio {
 	struct Block {	
@@ -16,5 +17,5 @@ export namespace mka::audio {
 		float*		outputs[constants::MAX_CHANNEL_COUNT] {};
 	};
 
-	typedef void(*Callback)(Block&);
+	typedef void(*Callback)(Block&, const mka::midi::Block&);
 }

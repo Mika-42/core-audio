@@ -34,7 +34,7 @@ engine.setBlockSize(<blockSize>);
 function signature
 
 ```cpp
-void <callback_name>(mka::audio::Block& block);
+void <callback_name>(mka::audio::Block& audioBlock, const mka::midi::Block& midiBlock);
 ```
 > [!WARNING]
 > The callback function **must obligatory** respect this signature. 
@@ -42,12 +42,16 @@ void <callback_name>(mka::audio::Block& block);
 **2.4 - mka::audio::Block structure**
 
 ```cpp
-block.blockSize;                     // read only uint32_t value
-block.sampleRate;                    // read only uint32_t value
-block.inputCount;                    // read only uint32_t value
-block.outputCount;                   // read only uint32_t value
-block.outputs[<channel>][<frame>];   // read and write float value
-block.inputs[<channel>][<frame>];    // read only float value
+audioBlock.blockSize;                     // read only uint32_t value
+audioBlock.sampleRate;                    // read only uint32_t value
+audioBlock.inputCount;                    // read only uint32_t value
+audioBlock.outputCount;                   // read only uint32_t value
+audioBlock.outputs[<channel>][<frame>];   // read and write float value
+audioBlock.inputs[<channel>][<frame>];    // read only float value
+midiBlock.eventCount;                     // read only uint32_t value
+midiBlock.events[<index>].frameOffset;    // frame index inside current audio block
+midiBlock.events[<index>].size;           // MIDI payload size in bytes
+midiBlock.events[<index>].data[<byte>];   // MIDI payload bytes
 ```
 
 Thanks to this structure you can operate over the buffer and access to related datas like samplerate, channels and frames.
@@ -92,12 +96,13 @@ simple_tone_generator example :
 
 import audio.jack;
 
-void audio_callback(mka::audio::Block& block) {
+void audio_callback(mka::audio::Block& audioBlock, const mka::midi::Block& midiBlock) {
+	(void)midiBlock;
 	static float phase = {};
 	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
-	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
+	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(audioBlock.sampleRate);
 
-	for(uint32_t i = 0; i < block.blockSize; ++i) {
+	for(uint32_t i = 0; i < audioBlock.blockSize; ++i) {
 		float sample = sinf(phase);
 
 		phase += phaseIncrement;
@@ -105,8 +110,8 @@ void audio_callback(mka::audio::Block& block) {
 			phase -= twoPi;
 		}
 
-		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
-			block.outputs[ch][i] = sample;
+		for(uint32_t ch = 0; ch < audioBlock.outputCount; ++ch) {
+			audioBlock.outputs[ch][i] = sample;
 		}
 	}
 }
