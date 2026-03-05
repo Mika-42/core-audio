@@ -11,6 +11,7 @@ export module audio.realtime_pipeline;
 export import audio.block;
 export import audio.config;
 import audio.constants;
+import audio.midi;
 
 export namespace mka::audio::realtime {
 
@@ -47,15 +48,11 @@ export namespace mka::audio::realtime {
 		}
 	}
 
-	inline size_t estimateRequiredResamplerInputFrames(const ResamplerState& resampler,
-									 size_t outputFrames) {
-		// Keep iteration planning in sync with renderOutput(): budget only what the
-		// resampler will really consume to avoid over-producing and FIFO oscillation.
+	inline size_t estimateRequiredResamplerInputFrames(const ResamplerState& resampler, size_t outputFrames) {
 		const double projected = resampler.phase
 			+ (static_cast<double>(outputFrames) * resampler.step);
 		size_t required = static_cast<size_t>(projected);
 
-		// Until the streaming state is seeded, process() needs bootstrap context.
 		if (!resampler.seeded) {
 			required += 4;
 		}
@@ -89,8 +86,6 @@ export namespace mka::audio::realtime {
 		for (Channel* output : outputChannels) {
 			if (!output) continue;
 
-			// Use the same phase-aware budgeting as renderOutput() to keep planning
-			// deterministic and prevent jitter between produce/consume sides.
 			const size_t required = estimateRequiredResamplerInputFrames(
 				output->outputResampler,
 				backendFrames
@@ -128,7 +123,8 @@ export namespace mka::audio::realtime {
 		std::span<Channel*> outputChannels,
 		float* inputStorage,
 		float* outputStorage,
-		size_t iterations) {
+		size_t iterations,
+		MidiTimeline* midiTimeline) {
 
 		if (!callback || !inputStorage || !outputStorage || blockSize == 0) {
 			return;
@@ -159,12 +155,29 @@ export namespace mka::audio::realtime {
 				std::memset(block.outputs[i], 0, sizeof(float) * blockSize);
 			}
 
+			block.startSample = 0;
+			block.midiEvents = nullptr;
+			block.midiEventCount = 0;
+
+			if (midiTimeline) {
+				// Point clé de synchro: on découpe les événements MIDI exactement sur
+				// la même fenêtre temporelle que le bloc DSP en cours.
+				const MidiBlockView midiView = midiTimeline->prepareBlock(blockSize);
+				block.startSample = midiView.startSample;
+				block.midiEvents = midiView.events;
+				block.midiEventCount = midiView.eventCount;
+			}
+
 			callback(block);
 
 			for (size_t i = 0; i < outputChannels.size(); ++i) {
 				Channel* output = outputChannels[i];
 				if (!output) continue;
 				output->fifo.push(block.outputs[i], blockSize);
+			}
+
+			if (midiTimeline) {
+				midiTimeline->advance(blockSize);
 			}
 		}
 	}
@@ -177,26 +190,7 @@ export namespace mka::audio::realtime {
 		if (!backendOutput || backendFrames == 0 || !resampleScratch || scratchCapacity == 0) {
 			return backendFrames;
 		}
-/*
-	// Important: the output FIFO must only pop frames that the resampler will
-		// actually consume on this cycle. Otherwise we drop valid samples and hear
-		// periodic crackles (data discontinuities).
-		//
-		// For a seeded streaming resampler, the number of new input frames needed to
-		// render `backendFrames` outputs is floor(phase + backendFrames * step).
-		// This is the exact number of interpolation-window advances performed in
-		// ResamplerState::process().
-		const double projected = channel.outputResampler.phase
-			+ (static_cast<double>(backendFrames) * channel.outputResampler.step);
-		size_t requiredInput = static_cast<size_t>(projected);
 		
-		// During startup, process() bootstraps up to 4 samples before it can render.
-		if (!channel.outputResampler.seeded) {
-			requiredInput += 4;
-		}
-*/
-		// Important: pop only frames that the resampler is expected to consume for
-		// this backend cycle (phase-aware budgeting avoids data discontinuities).
 		size_t requiredInput = estimateRequiredResamplerInputFrames(
 			channel.outputResampler,
 			backendFrames

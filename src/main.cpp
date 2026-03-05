@@ -6,6 +6,12 @@
 import audio.jack;
 
 void audio_callback(mka::audio::Block& block) {
+
+	for (uint32_t i = 0; i < block.midiEventCount; ++i) {
+		const auto& midi = block.midiEvents[i];
+		(void)midi;
+	}
+
 	static float phase = {};
 	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
 	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);

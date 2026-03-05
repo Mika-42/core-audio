@@ -39,6 +39,7 @@ MODULE_SRCS := \
 	$(SRC_DIR)/utils/constants.cppm \
 	$(SRC_DIR)/utils/error.cppm \
     $(SRC_DIR)/utils/ring_buffer.cppm \
+	$(SRC_DIR)/utils/midi.cppm \
 	$(SRC_DIR)/utils/config.cppm \
     $(SRC_DIR)/utils/block.cppm \
 	$(SRC_DIR)/utils/realtime_pipeline.cppm \

@@ -19,6 +19,9 @@ export import audio.error;
 import audio.constants;
 import audio.realtime_pipeline;
 import audio.abstract_core;
+import audio.midi;
+
+#include <jack/midiport.h>
 
 namespace mka::audio {
 	
@@ -60,6 +63,14 @@ namespace mka::audio {
 			jack_set_process_callback(client, processCallback, this);
 			jack_set_sample_rate_callback(client, sampleRateCallback, this);
 			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
+
+			midiInPort = jack_port_register(
+				client,
+				"midi_in",
+				JACK_DEFAULT_MIDI_TYPE,
+				JackPortIsInput,
+				0
+			);
 
 			// setting JACK API value
 			const uint32_t _jackSampleRate = jack_get_sample_rate(client);
@@ -199,6 +210,7 @@ namespace mka::audio {
 			state.store(State::Starting);
 
 			if (jack_activate(client) == 0) {
+				midiTimeline.reset(0);
 				state.store(State::Running);
 				return;
 			}
@@ -245,6 +257,7 @@ namespace mka::audio {
 				channelCount.store(0);
 				inputCount.store(0);
 				outputCount.store(0);
+				midiInPort = nullptr;
 
 				jack_client_close(client);
 				client = nullptr;
@@ -278,6 +291,8 @@ namespace mka::audio {
 		std::unique_ptr<float[]> outputBlockStorage;
 		std::unique_ptr<float[]> inputResampleScratch;
 		std::unique_ptr<float[]> outputResampleScratch;
+		jack_port_t* midiInPort = nullptr;
+		MidiTimeline midiTimeline {};
 
 		size_t inputCounter = 0;
 		size_t outputCounter = 0;
@@ -339,6 +354,36 @@ namespace mka::audio {
 		
 		const uint32_t engineSampleRate = engine->sampleRate.load(std::memory_order_acquire);
 
+		const uint32_t backendSampleRate = engine->jackSampleRate.load(std::memory_order_acquire);
+
+		const uint64_t callbackStartSample = engine->midiTimeline.currentSample();
+		if (engine->midiInPort && backendSampleRate > 0) {
+			void* midiBuffer = jack_port_get_buffer(engine->midiInPort, nframes);
+			const uint32_t eventCount = jack_midi_get_event_count(midiBuffer);
+
+			for (uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex) {
+				jack_midi_event_t jackEvent {};
+				if (jack_midi_event_get(&jackEvent, midiBuffer, eventIndex) != 0) {
+					continue;
+				}
+
+				if (!jackEvent.buffer || jackEvent.size == 0) {
+					continue;
+				}
+
+				// L'événement JACK est horodaté en frames backend dans ce callback.
+				// On le projette dans la timeline sample du moteur pour garder
+				// l'alignement exact avec les blocs fixes du DSP.
+				engine->midiTimeline.pushBackendOffsetEvent(
+					callbackStartSample,
+					jackEvent.time,
+					engineSampleRate,
+					backendSampleRate,
+					jackEvent.buffer,
+					jackEvent.size
+				);
+			}
+		}
 		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
 		const size_t inputCount		= engine->inputCount.load(std::memory_order_acquire);
 		const size_t outputCount	= engine->outputCount.load(std::memory_order_acquire);
@@ -406,7 +451,8 @@ namespace mka::audio {
 			std::span<Channel*>(outputChannelViews, outputCount),
 			engine->inputBlockStorage.get(),
 			engine->outputBlockStorage.get(),
-			processIt
+			processIt,
+			&engine->midiTimeline
 		);
 
 		for (i = 0; i < outputCount; ++i) {
