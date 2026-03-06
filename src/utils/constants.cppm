@@ -16,3 +16,26 @@ export namespace mka::audio::constants {
 	inline constexpr size_t MAX_MIDI_QUEUE_SIZE			= 2048;	
 	inline constexpr size_t MAX_MIDI_DEVICE_MAPPINGS	= 16;	// MIDI channels are defined in [0..15]
 }
+
+export namespace mka::audio {
+
+	enum class MIDI {
+		Channel1	= 0,
+		Channel2	= 1,
+		Channel3	= 2,
+		Channel4	= 3,
+		Channel5	= 4,
+		Channel6	= 5,
+		Channel7	= 6,
+		Channel8	= 7,
+		Channel9	= 8,
+		Channel10	= 9,
+		Channel11	= 10,
+		Channel12	= 11,
+		Channel13	= 12,
+		Channel14	= 13,
+		Channel15	= 14,
+		Channel16	= 15,
+		ChannelMax	= 16
+	};
+}

@@ -17,7 +17,8 @@ export module audio.jack;
 export import audio.block;
 export import audio.config;
 export import audio.error;
-import audio.constants;
+export import audio.constants;
+
 import audio.realtime_pipeline;
 import audio.abstract_core;
 import audio.midi;
@@ -157,7 +158,7 @@ namespace mka::audio {
 			return devices;
 		}
 
-		Result mapMidiDevice(const ChannelInfo channel, uint8_t channelNum) override {
+		Result mapMidiDevice(const ChannelInfo channel, MIDI channelNum) override {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			if (!client) {
 				return Result { Error::DeviceOpenFailed, "JACK client unavailable." };
@@ -167,7 +168,7 @@ namespace mka::audio {
 				return Result { Error::InvalidArgument, "MIDI device name must not be empty." };
 			}
 
-			if (channelNum >= constants::MAX_MIDI_DEVICE_MAPPINGS) {
+			if (channelNum >= MIDI::ChannelMax) {
 				return Result { Error::OutOfRange, "MIDI channel must be in [0..15]." };
 			}
 
@@ -187,7 +188,7 @@ namespace mka::audio {
 				}
 
 				// Reconfiguration path: keep realtime port alive and only change routing channel.
-				midiMappings[i].channel = channelNum;
+				midiMappings[i].channel = static_cast<uint8_t>(channelNum);
 				return Ok;
 			}
 
@@ -217,7 +218,7 @@ namespace mka::audio {
 			auto& mapping = midiMappings[midiMappingCount++];
 			std::strncpy(mapping.sourceName, channel.name, sizeof(mapping.sourceName) - 1);
 			mapping.sourceName[sizeof(mapping.sourceName) - 1] = '\0';
-			mapping.channel = channelNum;
+			mapping.channel = static_cast<uint8_t>(channelNum);
 			mapping.port = mappedPort;
 			return Ok;
 		}

@@ -10,6 +10,7 @@ export module audio.abstract_core;
 import audio.error;
 import audio.block;
 import audio.config;
+import audio.constants;
 
 export namespace mka::audio {
 	
@@ -23,7 +24,7 @@ export namespace mka::audio {
 
 		virtual std::vector<ChannelInfo> getChannels() = 0;
 		virtual std::vector<ChannelInfo> getMidiDevices() = 0;
-		virtual Result mapMidiDevice(const ChannelInfo channel, uint8_t channelNum) = 0;
+		virtual Result mapMidiDevice(const ChannelInfo channel, MIDI channelNum) = 0;
 	
 		virtual Result open(const ChannelInfo channel) = 0;	
 		virtual	Result close() = 0;

@@ -57,7 +57,7 @@ int main() {
 	std::print(">> enter number: ");
 	std::cin >> choice;
 	
-	engine.mapMidiDevice(MIDIchannels[choice], 0);
+	engine.mapMidiDevice(MIDIchannels[choice], mka::audio::MIDI::Channel1);
 
 	// [2] setup the engine
 	engine.setCallback(audio_callback);
