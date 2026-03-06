@@ -13,6 +13,9 @@ export namespace mka::audio {
 		XRun,
 		WouldBlock,
 		AlreadyExists,
+		InvalidArgument,
+		OutOfRange,
+		NotFound,
 	};
 
 	struct Result {

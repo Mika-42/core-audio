@@ -15,9 +15,6 @@ export namespace mka::audio {
 	
 	enum class State : uint8_t { Stopped, Starting, Running, Stopping, Closed };
 
-	/*
-	 * ! callback must be set before start() !
-	 */
 	class AbstractCoreAudio
 	{
 
@@ -25,6 +22,8 @@ export namespace mka::audio {
 		virtual ~AbstractCoreAudio() {}
 
 		virtual std::vector<ChannelInfo> getChannels() = 0;
+		virtual std::vector<ChannelInfo> getMidiDevices() = 0;
+		virtual Result mapMidiDevice(const char* deviceName, uint8_t channel) = 0;
 	
 		virtual Result open(const ChannelInfo channel) = 0;	
 		virtual	Result close() = 0;

@@ -14,4 +14,5 @@ export namespace mka::audio::constants {
 	inline constexpr size_t MAX_MIDI_MESSAGE_SIZE		= 3;	// channel voice messages (note on/off, CC, pitch bend)
 	inline constexpr size_t MAX_MIDI_EVENTS_PER_BLOCK	= 256;	// bounded stack array passed to callback per engine block
 	inline constexpr size_t MAX_MIDI_QUEUE_SIZE			= 2048;	
+	inline constexpr size_t MAX_MIDI_DEVICE_MAPPINGS	= 16;	// MIDI channels are defined in [0..15]
 }

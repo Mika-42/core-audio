@@ -3,6 +3,7 @@ module;
 #include <jack/jack.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <cmath>
@@ -36,7 +37,13 @@ namespace mka::audio {
 		Channel			channel;
 		jack_port_t*	port = nullptr;
 	};
-		
+	
+	struct JackMidiMapping {
+		char sourceName[256] {};
+		uint8_t channel = 0;
+		jack_port_t* port = nullptr;
+	};
+
 	export class JACK final : public AbstractCoreAudio {
 
 	public:
@@ -63,14 +70,6 @@ namespace mka::audio {
 			jack_set_process_callback(client, processCallback, this);
 			jack_set_sample_rate_callback(client, sampleRateCallback, this);
 			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
-
-			midiInPort = jack_port_register(
-				client,
-				"midi_in",
-				JACK_DEFAULT_MIDI_TYPE,
-				JackPortIsInput,
-				0
-			);
 
 			// setting JACK API value
 			const uint32_t _jackSampleRate = jack_get_sample_rate(client);
@@ -129,6 +128,100 @@ namespace mka::audio {
 			return channels;
 		}
 
+		std::vector<ChannelInfo> getMidiDevices() override {
+			if (!client) return {};
+
+			const char** ports = jack_get_ports(client, nullptr, JACK_DEFAULT_MIDI_TYPE, JackPortIsPhysical);
+			if (!ports) return {};
+
+			std::vector<ChannelInfo> devices;
+			for (size_t i = 0; ports[i]; ++i) {
+				jack_port_t* port = jack_port_by_name(client, ports[i]);
+				if (!port) continue;
+
+				ChannelInfo info {};
+				std::strncpy(info.name, ports[i], sizeof(info.name) - 1);
+				info.name[sizeof(info.name) - 1] = '\0';
+
+				const unsigned long flags = jack_port_flags(port);
+				info.direction = (flags & JackPortIsOutput) ? Direction::In : Direction::Out;
+				devices.emplace_back(info);
+			}
+
+			jack_free(ports);
+
+			std::ranges::sort(devices, [](const ChannelInfo& a, const ChannelInfo& b) {
+				return std::strcmp(a.name, b.name) < 0;
+			});
+
+			return devices;
+		}
+
+		Result mapMidiDevice(const char* deviceName, uint8_t channel) override {
+			std::lock_guard<std::mutex> lock(lifecycleMutex);
+			if (!client) {
+				return Result { Error::DeviceOpenFailed, "JACK client unavailable." };
+			}
+
+			if (!deviceName || deviceName[0] == '\0') {
+				return Result { Error::InvalidArgument, "MIDI device name must not be empty." };
+			}
+
+			if (channel > 15) {
+				return Result { Error::OutOfRange, "MIDI channel must be in [0..15]." };
+			}
+
+			jack_port_t* sourcePort = jack_port_by_name(client, deviceName);
+			if (!sourcePort) {
+				return Result { Error::NotFound, "MIDI device not found." };
+			}
+
+			const unsigned long sourceFlags = jack_port_flags(sourcePort);
+			if ((sourceFlags & JackPortIsOutput) == 0) {
+				return Result { Error::InvalidArgument, "MIDI mapping expects an input device (JACK output port)." };
+			}
+
+			for (size_t i = 0; i < midiMappingCount; ++i) {
+				if (std::strcmp(midiMappings[i].sourceName, deviceName) != 0) {
+					continue;
+				}
+
+				// Reconfiguration path: keep realtime port alive and only change routing channel.
+				midiMappings[i].channel = channel;
+				return Ok;
+			}
+
+			if (midiMappingCount >= midiMappings.size()) {
+				return Result { Error::GenericError, "Maximum MIDI mapping count reached." };
+			}
+
+			std::string portName = "mapped_midi_in_" + std::to_string(midiMappingCount);
+			jack_port_t* mappedPort = jack_port_register(
+				client,
+				portName.c_str(),
+				JACK_DEFAULT_MIDI_TYPE,
+				JackPortIsInput,
+				0
+			);
+
+			if (!mappedPort) {
+				return Result { Error::DeviceOpenFailed, "Failed to register mapped MIDI input port." };
+			}
+
+			const int connectErr = jack_connect(client, deviceName, jack_port_name(mappedPort));
+			if (connectErr != 0) {
+				jack_port_unregister(client, mappedPort);
+				return Result { Error::DeviceOpenFailed, "Failed to connect mapped MIDI input port." };
+			}
+
+			auto& mapping = midiMappings[midiMappingCount++];
+			std::strncpy(mapping.sourceName, deviceName, sizeof(mapping.sourceName) - 1);
+			mapping.sourceName[sizeof(mapping.sourceName) - 1] = '\0';
+			mapping.channel = channel;
+			mapping.port = mappedPort;
+			return Ok;
+		}
+		
 		Result open(const ChannelInfo channel) override {
 			
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
@@ -259,7 +352,16 @@ namespace mka::audio {
 				channelCount.store(0);
 				inputCount.store(0);
 				outputCount.store(0);
-				midiInPort = nullptr;
+				
+				for (size_t i = 0; i < midiMappingCount; ++i) {
+					if (midiMappings[i].port) {
+						jack_port_unregister(client, midiMappings[i].port);
+						midiMappings[i].port = nullptr;
+					}
+					midiMappings[i].sourceName[0] = '\0';
+					midiMappings[i].channel = 0;
+				}
+				midiMappingCount = 0;
 
 				jack_client_close(client);
 				client = nullptr;
@@ -293,7 +395,8 @@ namespace mka::audio {
 		std::unique_ptr<float[]> outputBlockStorage;
 		std::unique_ptr<float[]> inputResampleScratch;
 		std::unique_ptr<float[]> outputResampleScratch;
-		jack_port_t* midiInPort = nullptr;
+		std::array<JackMidiMapping, constants::MAX_MIDI_DEVICE_MAPPINGS> midiMappings {};
+		size_t midiMappingCount = 0;
 		MidiTimeline midiTimeline {};
 
 		size_t inputCounter = 0;
@@ -359,31 +462,54 @@ namespace mka::audio {
 		const uint32_t backendSampleRate = engine->jackSampleRate.load(std::memory_order_acquire);
 
 		const uint64_t callbackStartSample = engine->midiTimeline.currentSample();
-		if (engine->midiInPort && backendSampleRate > 0) {
-			void* midiBuffer = jack_port_get_buffer(engine->midiInPort, nframes);
-			const uint32_t eventCount = jack_midi_get_event_count(midiBuffer);
-
-			for (uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex) {
-				jack_midi_event_t jackEvent {};
-				if (jack_midi_event_get(&jackEvent, midiBuffer, eventIndex) != 0) {
+			
+		if (backendSampleRate > 0) {
+			for (size_t mappingIndex = 0; mappingIndex < engine->midiMappingCount; ++mappingIndex) {
+				const auto& mapping = engine->midiMappings[mappingIndex];
+				if (!mapping.port) {
 					continue;
 				}
 
-				if (!jackEvent.buffer || jackEvent.size == 0) {
+				void* midiBuffer = jack_port_get_buffer(mapping.port, nframes);
+				if (!midiBuffer) {
 					continue;
 				}
 
-				// L'événement JACK est horodaté en frames backend dans ce callback.
-				// On le projette dans la timeline sample du moteur pour garder
-				// l'alignement exact avec les blocs fixes du DSP.
-				engine->midiTimeline.pushBackendOffsetEvent(
-					callbackStartSample,
-					jackEvent.time,
-					engineSampleRate,
-					backendSampleRate,
-					jackEvent.buffer,
-					jackEvent.size
-				);
+				const uint32_t eventCount = jack_midi_get_event_count(midiBuffer);
+				for (uint32_t eventIndex = 0; eventIndex < eventCount; ++eventIndex) {
+					jack_midi_event_t jackEvent {};
+					if (jack_midi_event_get(&jackEvent, midiBuffer, eventIndex) != 0) {
+						continue;
+					}
+
+					if (!jackEvent.buffer || jackEvent.size == 0) {
+						continue;
+					}
+
+					std::array<uint8_t, constants::MAX_MIDI_MESSAGE_SIZE> mappedBytes {};
+					const size_t cappedSize = std::min(static_cast<size_t>(jackEvent.size), mappedBytes.size());
+					for (size_t byteIndex = 0; byteIndex < cappedSize; ++byteIndex) {
+						mappedBytes[byteIndex] = jackEvent.buffer[byteIndex];
+					}
+
+					// Apply channel routing only to MIDI channel voice messages (0x8n..0xEn).
+					// System messages keep their status byte untouched.
+					if (cappedSize > 0) {
+						const uint8_t status = mappedBytes[0];
+						if (status >= 0x80 && status <= 0xEF) {
+							mappedBytes[0] = static_cast<uint8_t>((status & 0xF0u) | (mapping.channel & 0x0Fu));
+						}
+					}
+
+					engine->midiTimeline.pushBackendOffsetEvent(
+						callbackStartSample,
+						jackEvent.time,
+						engineSampleRate,
+						backendSampleRate,
+						mappedBytes.data(),
+						cappedSize
+					);
+				}
 			}
 		}
 		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);

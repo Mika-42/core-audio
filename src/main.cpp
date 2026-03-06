@@ -40,6 +40,12 @@ int main() {
 		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
     }
 	
+	auto MIDIchannels = engine.getMidiDevices();
+    for (auto& ch : MIDIchannels) {	
+		std::println("channel name:\t{}", ch.name);
+		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
+    }
+
 	// [1] select one of them
 	int choice = 0;
 	std::print(">> enter number: ");
