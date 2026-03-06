@@ -4,6 +4,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
+#include <atomic>
 
 export module audio.midi;
 
@@ -86,6 +87,36 @@ export namespace mka::audio {
 			return written;
 		}
 
+		// Droppe les événements supplémentaires de la fenêtre courante.
+		// Cette stratégie évite de reporter ces événements au bloc suivant,
+		// ce qui créerait une distorsion temporelle audible.
+		size_t discardOverflowForBlock(uint64_t blockStartSample, uint32_t blockSize) noexcept {
+			if (blockSize == 0) {
+				return 0;
+			}
+
+			const uint64_t blockEndSample = blockStartSample + static_cast<uint64_t>(blockSize);
+			size_t dropped = 0;
+
+			while (true) {
+				if (!pendingEventValid) {
+					if (fifo.pop(&pendingEvent, 1) != 1) {
+						break;
+					}
+					pendingEventValid = true;
+				}
+
+				if (pendingEvent.sampleTime >= blockEndSample) {
+					break;
+				}
+
+				pendingEventValid = false;
+				++dropped;
+			}
+
+			return dropped;
+		}
+
 		void reset() noexcept {
 			MidiEvent tmp {};
 			while (fifo.pop(&tmp, 1) == 1) {}
@@ -108,6 +139,8 @@ export namespace mka::audio {
 		void reset(uint64_t startSample = 0) noexcept {
 			sampleCursor = startSample;
 			queue.reset();
+			queueOverflowCount.store(0, std::memory_order_relaxed);
+			blockOverflowCount.store(0, std::memory_order_relaxed);
 		}
 
 		uint64_t currentSample() const noexcept {
@@ -119,7 +152,11 @@ export namespace mka::audio {
 		}
 
 		bool pushEvent(const MidiEvent& event) noexcept {
-			return queue.push(event);
+			const bool pushed = queue.push(event);
+			if (!pushed) {
+				queueOverflowCount.fetch_add(1, std::memory_order_relaxed);
+			}
+			return pushed;
 		}
 
 		// Convertit un offset backend -> offset moteur, puis push en timeline absolue.
@@ -145,7 +182,12 @@ export namespace mka::audio {
 				/ static_cast<uint64_t>(backendSampleRate);
 
 			event.sampleTime = callbackStartSample + engineOffsetSamples;
-			return queue.push(event);
+
+			const bool pushed = queue.push(event);
+			if (!pushed) {
+				queueOverflowCount.fetch_add(1, std::memory_order_relaxed);
+			}
+			return pushed;
 		}
 
 		MidiBlockView prepareBlock(uint32_t blockSize) noexcept {
@@ -159,15 +201,36 @@ export namespace mka::audio {
 				blockEvents.size()
 			);
 
+			// Si le nombre d'événements MIDI dans cette fenêtre dépasse la capacité
+			// exportée au callback, le surplus est explicitement jeté dans la même
+			// fenêtre temporelle. On évite ainsi de décaler des événements sur le
+			// bloc suivant (distorsion temporelle perçue).
+			const size_t droppedInBlock = queue.discardOverflowForBlock(
+				sampleCursor,
+				blockSize
+			);
+
+			blockOverflowCount.fetch_add(droppedInBlock, std::memory_order_relaxed);
+
 			view.events = blockEvents.data();
 			view.eventCount = static_cast<uint32_t>(count);
 			return view;
+		}
+
+		size_t queueOverflows() const noexcept {
+			return queueOverflowCount.load(std::memory_order_relaxed);
+		}
+
+		size_t blockOverflows() const noexcept {
+			return blockOverflowCount.load(std::memory_order_relaxed);
 		}
 
 	private:
 		MidiEventQueue<> queue {};
 		std::array<MidiBlockEvent, constants::MAX_MIDI_EVENTS_PER_BLOCK> blockEvents {};
 		uint64_t sampleCursor = 0;
+		std::atomic<size_t> queueOverflowCount = 0;
+		std::atomic<size_t> blockOverflowCount = 0;
 	};
 }
 

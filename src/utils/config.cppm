@@ -172,6 +172,8 @@ export namespace mka::audio {
 		size_t xrunCount = 0;
 		size_t underrunCount = 0;
 		size_t outputMissingFrames = 0;
+		size_t midiQueueOverflowCount = 0;
+		size_t midiBlockOverflowCount = 0;
 		uint32_t backendSampleRate = 0;
 		uint32_t backendBufferSize = 0;
 		size_t openedChannels = 0;

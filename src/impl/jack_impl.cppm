@@ -228,6 +228,8 @@ namespace mka::audio {
 			stats.xrunCount = xrunCount.load(std::memory_order_relaxed);
 			stats.underrunCount = underrunCount.load(std::memory_order_relaxed);
 			stats.outputMissingFrames = outputMissingFrames.load(std::memory_order_relaxed);
+			stats.midiQueueOverflowCount = midiTimeline.queueOverflows();
+			stats.midiBlockOverflowCount = midiTimeline.blockOverflows();
 			stats.backendSampleRate = jackSampleRate.load(std::memory_order_relaxed);
 			stats.backendBufferSize = jackBufferSize.load(std::memory_order_relaxed);
 			stats.openedChannels = channelCount.load(std::memory_order_relaxed);
