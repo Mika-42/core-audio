@@ -23,7 +23,7 @@ export namespace mka::audio {
 
 		virtual std::vector<ChannelInfo> getChannels() = 0;
 		virtual std::vector<ChannelInfo> getMidiDevices() = 0;
-		virtual Result mapMidiDevice(const char* deviceName, uint8_t channel) = 0;
+		virtual Result mapMidiDevice(const ChannelInfo channel, uint8_t channelNum) = 0;
 	
 		virtual Result open(const ChannelInfo channel) = 0;	
 		virtual	Result close() = 0;

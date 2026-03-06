@@ -157,21 +157,21 @@ namespace mka::audio {
 			return devices;
 		}
 
-		Result mapMidiDevice(const char* deviceName, uint8_t channel) override {
+		Result mapMidiDevice(const ChannelInfo channel, uint8_t channelNum) override {
 			std::lock_guard<std::mutex> lock(lifecycleMutex);
 			if (!client) {
 				return Result { Error::DeviceOpenFailed, "JACK client unavailable." };
 			}
 
-			if (!deviceName || deviceName[0] == '\0') {
+			if (!channel.name || channel.name[0] == '\0') {
 				return Result { Error::InvalidArgument, "MIDI device name must not be empty." };
 			}
 
-			if (channel > 15) {
+			if (channelNum >= constants::MAX_MIDI_DEVICE_MAPPINGS) {
 				return Result { Error::OutOfRange, "MIDI channel must be in [0..15]." };
 			}
 
-			jack_port_t* sourcePort = jack_port_by_name(client, deviceName);
+			jack_port_t* sourcePort = jack_port_by_name(client, channel.name);
 			if (!sourcePort) {
 				return Result { Error::NotFound, "MIDI device not found." };
 			}
@@ -182,12 +182,12 @@ namespace mka::audio {
 			}
 
 			for (size_t i = 0; i < midiMappingCount; ++i) {
-				if (std::strcmp(midiMappings[i].sourceName, deviceName) != 0) {
+				if (std::strcmp(midiMappings[i].sourceName, channel.name) != 0) {
 					continue;
 				}
 
 				// Reconfiguration path: keep realtime port alive and only change routing channel.
-				midiMappings[i].channel = channel;
+				midiMappings[i].channel = channelNum;
 				return Ok;
 			}
 
@@ -208,16 +208,16 @@ namespace mka::audio {
 				return Result { Error::DeviceOpenFailed, "Failed to register mapped MIDI input port." };
 			}
 
-			const int connectErr = jack_connect(client, deviceName, jack_port_name(mappedPort));
+			const int connectErr = jack_connect(client, channel.name, jack_port_name(mappedPort));
 			if (connectErr != 0) {
 				jack_port_unregister(client, mappedPort);
 				return Result { Error::DeviceOpenFailed, "Failed to connect mapped MIDI input port." };
 			}
 
 			auto& mapping = midiMappings[midiMappingCount++];
-			std::strncpy(mapping.sourceName, deviceName, sizeof(mapping.sourceName) - 1);
+			std::strncpy(mapping.sourceName, channel.name, sizeof(mapping.sourceName) - 1);
 			mapping.sourceName[sizeof(mapping.sourceName) - 1] = '\0';
-			mapping.channel = channel;
+			mapping.channel = channelNum;
 			mapping.port = mappedPort;
 			return Ok;
 		}
