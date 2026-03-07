@@ -40,8 +40,9 @@ namespace mka::audio {
 	};
 	
 	struct JackMidiMapping {
-		char sourceName[256] {};
+		char deviceName[256] {};
 		uint8_t channel = 0;
+		Direction direction = Direction::In;
 		jack_port_t* port = nullptr;
 	};
 
@@ -172,18 +173,23 @@ namespace mka::audio {
 				return Result { Error::OutOfRange, "MIDI channel must be in [0..15]." };
 			}
 
-			jack_port_t* sourcePort = jack_port_by_name(client, channel.name);
-			if (!sourcePort) {
+			jack_port_t* devicePort = jack_port_by_name(client, channel.name);
+			if (!devicePort) {
 				return Result { Error::NotFound, "MIDI device not found." };
 			}
 
-			const unsigned long sourceFlags = jack_port_flags(sourcePort);
-			if ((sourceFlags & JackPortIsOutput) == 0) {
-				return Result { Error::InvalidArgument, "MIDI mapping expects an input device (JACK output port)." };
+			const unsigned long deviceFlags = jack_port_flags(devicePort);
+			if (channel.direction == Direction::In && (deviceFlags & JackPortIsOutput) == 0) {
+				return Result { Error::InvalidArgument, "MIDI input mapping expects a JACK output port." };
+			}
+
+			if (channel.direction == Direction::Out && (deviceFlags & JackPortIsInput) == 0) {
+				return Result { Error::InvalidArgument, "MIDI output mapping expects a JACK input port." };
 			}
 
 			for (size_t i = 0; i < midiMappingCount; ++i) {
-				if (std::strcmp(midiMappings[i].sourceName, channel.name) != 0) {
+
+				if (std::strcmp(midiMappings[i].deviceName, channel.name) != 0 || midiMappings[i].direction != channel.direction) {
 					continue;
 				}
 
@@ -196,29 +202,42 @@ namespace mka::audio {
 				return Result { Error::GenericError, "Maximum MIDI mapping count reached." };
 			}
 
-			std::string portName = "mapped_midi_in_" + std::to_string(midiMappingCount);
+			std::string portName = (channel.direction == Direction::In)
+				? "midi_in_" + std::to_string(midiMappingCount)
+				: "midi_out_" + std::to_string(midiMappingCount);
+
+			const unsigned long mappingPortFlags = (channel.direction == Direction::In)
+				? JackPortIsInput
+				: JackPortIsOutput;
+
 			jack_port_t* mappedPort = jack_port_register(
 				client,
 				portName.c_str(),
 				JACK_DEFAULT_MIDI_TYPE,
-				JackPortIsInput,
+				mappingPortFlags,
 				0
 			);
 
 			if (!mappedPort) {
-				return Result { Error::DeviceOpenFailed, "Failed to register mapped MIDI input port." };
+				return Result { Error::DeviceOpenFailed, "Failed to register mapped MIDI port." };
 			}
 
-			const int connectErr = jack_connect(client, channel.name, jack_port_name(mappedPort));
+			const char* mappedName = jack_port_name(mappedPort);
+			const char* sourceName = (channel.direction == Direction::In) ? channel.name : mappedName;
+			const char* targetName = (channel.direction == Direction::In) ? mappedName : channel.name;
+
+			const int connectErr = jack_connect(client, sourceName, targetName);
+			
 			if (connectErr != 0) {
 				jack_port_unregister(client, mappedPort);
-				return Result { Error::DeviceOpenFailed, "Failed to connect mapped MIDI input port." };
+				return Result { Error::DeviceOpenFailed, "Failed to connect mapped MIDI port." };
 			}
 
 			auto& mapping = midiMappings[midiMappingCount++];
-			std::strncpy(mapping.sourceName, channel.name, sizeof(mapping.sourceName) - 1);
-			mapping.sourceName[sizeof(mapping.sourceName) - 1] = '\0';
+			std::strncpy(mapping.deviceName, channel.name, sizeof(mapping.deviceName) - 1);
+			mapping.deviceName[sizeof(mapping.deviceName) - 1] = '\0';
 			mapping.channel = static_cast<uint8_t>(channelNum);
+			mapping.direction = channel.direction;
 			mapping.port = mappedPort;
 			return Ok;
 		}
@@ -359,8 +378,9 @@ namespace mka::audio {
 						jack_port_unregister(client, midiMappings[i].port);
 						midiMappings[i].port = nullptr;
 					}
-					midiMappings[i].sourceName[0] = '\0';
+					midiMappings[i].deviceName[0] = '\0';
 					midiMappings[i].channel = 0;
+					midiMappings[i].direction = Direction::In;
 				}
 				midiMappingCount = 0;
 
@@ -465,9 +485,33 @@ namespace mka::audio {
 		const uint64_t callbackStartSample = engine->midiTimeline.currentSample();
 			
 		if (backendSampleRate > 0) {
+
+			void* outputMidiBuffers[constants::MAX_MIDI_DEVICE_MAPPINGS] {};
+			size_t outputMidiBufferCount = 0;
+			
 			for (size_t mappingIndex = 0; mappingIndex < engine->midiMappingCount; ++mappingIndex) {
 				const auto& mapping = engine->midiMappings[mappingIndex];
-				if (!mapping.port) {
+
+				if (!mapping.port || mapping.direction != Direction::Out) {
+					continue;
+				}
+
+				void* midiBuffer = jack_port_get_buffer(mapping.port, nframes);
+				if (!midiBuffer) {
+					continue;
+				}
+
+				// JACK ne clear pas automatiquement les buffers MIDI de sortie.
+				// On les remet à zéro en début de callback pour éviter toute donnée résiduelle.
+				jack_midi_clear_buffer(midiBuffer);
+				if (outputMidiBufferCount < constants::MAX_MIDI_DEVICE_MAPPINGS) {
+					outputMidiBuffers[outputMidiBufferCount++] = midiBuffer;
+				}
+			}
+
+			for (size_t mappingIndex = 0; mappingIndex < engine->midiMappingCount; ++mappingIndex) {
+				const auto& mapping = engine->midiMappings[mappingIndex];
+				if (!mapping.port || mapping.direction != Direction::In) {
 					continue;
 				}
 
@@ -510,6 +554,15 @@ namespace mka::audio {
 						mappedBytes.data(),
 						cappedSize
 					);
+
+					for (size_t outIndex = 0; outIndex < outputMidiBufferCount; ++outIndex) {
+						(void)jack_midi_event_write(
+							outputMidiBuffers[outIndex],
+							jackEvent.time,
+							mappedBytes.data(),
+							static_cast<size_t>(cappedSize)
+						);
+					}
 				}
 			}
 		}

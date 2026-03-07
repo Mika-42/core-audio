@@ -5,33 +5,105 @@
 
 import audio.jack;
 
+float midiToFreq(int midiNote) {
+    return 440.0f * std::pow(2.0f, (midiNote - 69) / 12.0f);
+}
+/*
 void audio_callback(mka::audio::Block& block) {
 
-	for (uint32_t i = 0; i < block.midiEventCount; ++i) {
-		const auto& midi = block.midiEvents[i];
-
-		std::println("frame offset: {}, size: {}, [{}, {}, {}]", midi.frameOffset, midi.size, midi.data[0], midi.data[1], midi.data[2]);
-		(void)midi;
-	}
-
-	static float phase = {};
+	static float phase[128] = {};
 	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
-	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
 
 	for(uint32_t i = 0; i < block.blockSize; ++i) {
-		float sample = sinf(phase);
+		float sample = 0;
+		for (uint32_t idx = 0; idx < block.midiEventCount; ++idx) {
+			const auto& midi = block.midiEvents[idx];
 
-		phase += phaseIncrement;
-		if (phase >= twoPi) {
-			phase -= twoPi;
+			if(midi.frameOffset != 0) {
+				continue;
+			}
+
+			sample += midi.data[2] / 127.0f * sinf(phase[idx]);
+
+			phase[idx] += twoPi * midiToFreq(midi.data[1]) / static_cast<float>(block.sampleRate);
+			if (phase[idx] >= twoPi) {
+				phase[idx] -= twoPi;
+			}
 		}
+
+		sample /= static_cast<float>(block.midiEventCount);
 
 		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
 			block.outputs[ch][i] = sample;
 		}
 	}
 }
+*/
 
+void audio_callback(mka::audio::Block& block)
+{
+    static float phase[128] = {};
+    static bool noteActive[128] = {};
+    static float velocity[128] = {};
+
+    constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
+
+    uint32_t evtIndex = 0;
+
+    for(uint32_t frame = 0; frame < block.blockSize; ++frame)
+    {
+        // appliquer les events MIDI au bon sample
+        while(evtIndex < block.midiEventCount &&
+              block.midiEvents[evtIndex].frameOffset == frame)
+        {
+            const auto& midi = block.midiEvents[evtIndex];
+
+            uint8_t status = midi.data[0] & 0xF0;
+            uint8_t note   = midi.data[1];
+            uint8_t vel    = midi.data[2];
+
+            if(status == 0x90 && vel > 0) // note on
+            {
+                noteActive[note] = true;
+                velocity[note] = vel / 127.0f;
+            }
+            else if(status == 0x80 || (status == 0x90 && vel == 0)) // note off
+            {
+                noteActive[note] = false;
+            }
+
+            evtIndex++;
+        }
+
+        float sample = 0.0f;
+        int activeCount = 0;
+
+        // synthèse
+        for(int note = 0; note < 128; ++note)
+        {
+            if(!noteActive[note])
+                continue;
+
+            float freq = midiToFreq(note);
+
+            sample += velocity[note] * sinf(phase[note]);
+
+            phase[note] += twoPi * freq / block.sampleRate;
+            if(phase[note] >= twoPi)
+                phase[note] -= twoPi;
+
+            activeCount++;
+        }
+
+        if(activeCount > 0)
+            sample /= activeCount;
+
+        for(uint32_t ch = 0; ch < block.outputCount; ++ch)
+        {
+            block.outputs[ch][frame] = sample;
+        }
+    }
+}
 int main() {
 	mka::audio::JACK engine;
 	
