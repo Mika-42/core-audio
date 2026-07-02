@@ -17,7 +17,7 @@ DBG_FLAGS := -g -Og -fdiagnostics-all-candidates
 CPP_FLAGS := -Wall -Wextra -Werror -Wpedantic -Werror=unused-result
 # PW_FLAGS := $(shell pkg-config --cflags --libs libpipewire-0.3)
 
-LIBS := -ljack # -lasound
+LIBS := -lasound # -ljack
 
 #=============================================================================#
 # Directories
@@ -38,13 +38,10 @@ EXAMPLE_BUILD_DIR := $(BUILD_DIR)/examples
 MODULE_SRCS := \
 	$(SRC_DIR)/utils/constants.cppm \
 	$(SRC_DIR)/utils/error.cppm \
-    $(SRC_DIR)/utils/ring_buffer.cppm \
-	$(SRC_DIR)/utils/midi.cppm \
 	$(SRC_DIR)/utils/config.cppm \
-    $(SRC_DIR)/utils/block.cppm \
-	$(SRC_DIR)/utils/realtime_pipeline.cppm \
     $(SRC_DIR)/abstract_core.cppm \
-	$(SRC_DIR)/impl/jack_impl.cppm
+	$(SRC_DIR)/impl/alsa_impl.cppm
+#	$(SRC_DIR)/impl/jack_impl.cppm
 #    $(SRC_DIR)/impl/alsa_impl.cppm \
 #    $(SRC_DIR)/impl/pipewire_impl.cppm \
 

@@ -1,4 +1,8 @@
+module;
+#include <string>
 export module audio.error;
+
+using namespace std::literals;
 
 export namespace mka::audio {
 
@@ -20,7 +24,7 @@ export namespace mka::audio {
 
 	struct Result {
 		Error		error;
-		const char*	message;
+		std::string	message;
 
 		bool ok() const {	
 			return error == Error::None;
@@ -42,7 +46,7 @@ export namespace mka::audio {
 		}
 	};
 
-	inline constexpr Result Ok { Error::None, nullptr };
-	inline constexpr Result Fail { Error::GenericError, "generic error occured." };
+	inline constexpr Result Ok { Error::None, ""s };
+	inline const Result Fail { Error::GenericError, "generic error occured."s };
 
 }

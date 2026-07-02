@@ -10,32 +10,4 @@ export namespace mka::audio::constants {
 	inline constexpr size_t MAX_BLOCK_SIZE				= 8192;	//2^13
 	inline constexpr size_t MAX_FIFO_SIZE				= MAX_BLOCK_COUNT * MAX_BLOCK_SIZE; //2^17
 	inline constexpr size_t MAX_STATIC_BUFFER_SIZE		= MAX_CHANNEL_COUNT * MAX_BLOCK_SIZE;
-
-	inline constexpr size_t MAX_MIDI_MESSAGE_SIZE		= 3;	// channel voice messages (note on/off, CC, pitch bend)
-	inline constexpr size_t MAX_MIDI_EVENTS_PER_BLOCK	= 256;	// bounded stack array passed to callback per engine block
-	inline constexpr size_t MAX_MIDI_QUEUE_SIZE			= 2048;	
-	inline constexpr size_t MAX_MIDI_DEVICE_MAPPINGS	= 16;	// MIDI channels are defined in [0..15]
-}
-
-export namespace mka::audio {
-
-	enum class MIDI {
-		Channel1	= 0,
-		Channel2	= 1,
-		Channel3	= 2,
-		Channel4	= 3,
-		Channel5	= 4,
-		Channel6	= 5,
-		Channel7	= 6,
-		Channel8	= 7,
-		Channel9	= 8,
-		Channel10	= 9,
-		Channel11	= 10,
-		Channel12	= 11,
-		Channel13	= 12,
-		Channel14	= 13,
-		Channel15	= 14,
-		Channel16	= 15,
-		ChannelMax	= 16
-	};
 }

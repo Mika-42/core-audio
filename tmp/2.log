@@ -1,0 +1,7 @@
+Entering playback thread (ALSA).
+Get period size: 2756  buffer size: 22050
+Playing generated audio sine wave
+Playback completed.
+
+Return value is 0
+alsabat -P default

@@ -1,0 +1,35 @@
+Entering playback thread (ALSA).
+Get period size: 2756  buffer size: 22050
+Playing generated audio sine wave
+Entering capture thread (ALSA).
+Get period size: 2756  buffer size: 22050
+Recording ...
+Playback completed.
+Capture completed.
+
+BAT analysis: signal has 65536 frames at 44100 Hz, 2 channels, 2 bytes per sample.
+
+Channel 1 - Checking for target frequency 997.00 Hz
+Amplitude: 672.2; Percentage: [2]
+Detected peak at 43.74 Hz of 28.86 dB
+ Total 38.1 dB from 33.65 to 49.80 Hz
+ FAIL: Peak freq too low 43.74 Hz
+Detected peak at 63.25 Hz of 20.70 dB
+ Total 39.3 dB from 51.14 to 67.29 Hz
+ FAIL: Peak freq too low 63.25 Hz
+Detected peak at 72.00 Hz of 20.87 dB
+ Total 39.8 dB from 68.64 to 74.69 Hz
+ FAIL: Peak freq too low 72.00 Hz
+Detected peak at 76.71 Hz of 16.61 dB
+ Total 39.8 dB from 76.04 to 77.38 Hz
+ FAIL: Peak freq too low 76.71 Hz
+Detected peak at 80.75 Hz of 18.38 dB
+ Total 40.0 dB from 79.40 to 82.77 Hz
+ FAIL: Peak freq too low 80.75 Hz
+Detected peak at 997.26 Hz of 20.57 dB
+ Total 40.1 dB from 996.58 to 997.26 Hz
+ PASS: Peak detected at target frequency
+Detected at least 6 signal(s) in total
+
+Return value is -1003
+alsabat -P default -C default -f cd
