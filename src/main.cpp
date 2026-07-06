@@ -4,7 +4,7 @@
 #include <cmath>
 
 import audio.abstract_core;
-import audio.alsa;
+import audio.pipewire;
 
 #define CHECK(x)								\
 do {											\
@@ -46,31 +46,40 @@ void print_info(const mka::audio::DeviceInfo& info) {
 
 void print_devices(const auto &devices) {
 	for(const auto& d : devices) {
-		std::println("hardwareID : {}, name : {}", d.hardwareID, d.name);
+		std::println("nodeName : {}, description : {}, sink : {}, source : {}", d.nodeName, d.description, d.isSink, d.isSource);
 	}
 }
 
 int main() {
-	mka::audio::ALSA engine;
+	mka::audio::PipeWire engine;
 
 	const auto devices = engine.enumerateDevices();
 	print_devices(devices);
-
-	// [1] select one of them
-	int choice = 0;
-	std::print(">> enter number: ");
-	std::cin >> choice;
 
 	// [2] setup the engine
 	engine.setCallback(audio_callback);
 
 	// [3] open the desire channel
+	// output 0 : master L
+	// output 1 : master R
+	// output 2 : headphone L
+	// output 3 : headphone R
+	// output 4
+	// output 5
+	// output 6
+	// output 7
+	// output 8
+	// output 9
+	// output 10
+	// output 11
+	// output 12
+	// output 13
+	// output 14
+	// output 15
 	mka::audio::DeviceConfig cfg {
-		.deviceID = devices[choice].hardwareID,
 		.sampleRate = 44100,
-		.inputChannels = 0,
-		.outputChannels = 2,
-
+		.inputChannels = 16,
+		.outputChannels = 16,
 	};
 
 	CHECK(engine.open(cfg));
