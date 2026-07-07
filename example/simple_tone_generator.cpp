@@ -6,22 +6,30 @@
 import audio.jack;
 
 void audio_callback(mka::audio::Block& block) {
-	static float phase = {};
-	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
-	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
+    static float phase = 0.0f;
 
-	for(uint32_t i = 0; i < block.blockSize; ++i) {
-		float sample = sinf(phase);
+    const float sampleRate = static_cast<float>(block.sampleRate);
+    const float frequency  = 440.0f;
+    const float amplitude  = 1.0f; // évite tout risque de clipping
 
-		phase += phaseIncrement;
-		if (phase >= twoPi) {
-			phase -= twoPi;
-		}
+    const float twoPi = 2.0f * std::numbers::pi_v<float>;
+    const float phaseIncrement = twoPi * frequency / sampleRate;
 
-		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
-			block.outputs[ch][i] = sample;
-		}
-	}
+    for (uint32_t i = 0; i < block.blockSize; ++i) {
+      // Génération du sample
+      float sample = amplitude * std::sinf(phase);
+
+      // Avance de phase
+      phase += phaseIncrement;
+        // Wrap propre (évite dérive)
+      if (phase >= twoPi)
+          phase -= twoPi;
+
+      // Écriture dans toutes les sorties
+      for (uint32_t ch = 0; ch < block.outputCount; ++ch) {
+        block.outputs[ch][i] = sample;
+      }
+    }
 }
 
 int main() {
@@ -29,10 +37,10 @@ int main() {
 	
 	// [0] list all availables channels
 	auto channels = engine.getChannels();
-    for (auto& ch : channels) {	
-		std::println("channel name:\t{}", ch.name);
-		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
-    }
+    
+  for (auto& ch : channels) {
+		  std::println("channel name:\t{}", ch.name);
+  }
 	
 	// [1] select one of them
 	int choice = 0;
@@ -49,7 +57,7 @@ int main() {
 	if(!ret.ok()) {
         std::println("error::{}", ret.message);
         return -1;
-    }
+  }
 
 	// [4] start the engine
 	engine.start();
@@ -66,7 +74,7 @@ int main() {
 	if(!ret.ok()) {
         std::println("error::{}", ret.message);
         return -1;
-    }
+  }
 
 	return 0;
 }

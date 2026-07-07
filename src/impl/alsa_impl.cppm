@@ -1,482 +1,649 @@
 module;
-
-#include <iostream>
-#include <cstring>
-#include <algorithm>
+#include <alsa/asoundlib.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
-#include <cstdio>
-#include <alsa/asoundlib.h>
-
-#include <sys/mman.h>
-
-inline void logAlsaError(const char* what, int code) {
-	std::fprintf(stderr, "[ALSA] %s failed: %s (%d)\n", what, snd_strerror(code), code);
-}
-
-#define ALSA_CHECK(_call_or_value, _error_code)	do {							\
-	int _alsa_retcode = (_call_or_value);										\
-	if(_alsa_retcode < 0) {														\
-		logAlsaError(#_call_or_value, _alsa_retcode);							\
-		return mka::audio::Result { _error_code, snd_strerror(_alsa_retcode) };	\
-	}																			\
-} while(0);
-
-#define ALSA_LOG_ERROR(_call_or_value)	do {						\
-	int _alsa_retcode = (_call_or_value);							\
-	if(_alsa_retcode < 0) {											\
-		logAlsaError(#_call_or_value, _alsa_retcode);				\
-	}																\
-} while(0);
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
 
 export module audio.alsa;
-export import audio.block;
-export import audio.config;
-export import audio.error;
-
 import audio.abstract_core;
+import audio.error;
+import audio.config;
+import audio.constants;
 
-//---- alsa wrapper ----//
-snd_pcm_format_t select_format(mka::audio::Format fmt) {
-    switch(fmt) {
-        case mka::audio::Format::Int16:   return SND_PCM_FORMAT_S16_LE;
-        case mka::audio::Format::Int24:   return SND_PCM_FORMAT_S24_LE;
-        case mka::audio::Format::Int32:   return SND_PCM_FORMAT_S32_LE;
-        case mka::audio::Format::Float32: return SND_PCM_FORMAT_FLOAT_LE;
-        case mka::audio::Format::Float64: return SND_PCM_FORMAT_FLOAT64_LE;
-    }
-    return SND_PCM_FORMAT_FLOAT_LE;
-}
+namespace mka::audio {
 
-bool add_format(std::vector<mka::audio::Format>& v, snd_pcm_format_t f) {
-    auto push = [&](mka::audio::Format fmt)
-    {
-        if (std::find(v.begin(), v.end(), fmt) == v.end()) {
-			v.push_back(fmt);
+	namespace {
+		// Formats essayés dans l'ordre de préférence : le plus proche de float
+		// d'abord, on redescend en précision seulement si le device ne suit pas.
+		// Permet à hw: (accès direct, sans conversion driver) de fonctionner
+		// même sur du matériel qui ne parle pas Float32 nativement.
+		constexpr snd_pcm_format_t kFormatCandidates[] = {
+			SND_PCM_FORMAT_FLOAT_LE,
+			SND_PCM_FORMAT_S32_LE,
+			SND_PCM_FORMAT_S24_3LE,
+			SND_PCM_FORMAT_S16_LE
+		};
+
+		SampleFormat toSampleFormat(snd_pcm_format_t fmt) {
+			switch (fmt) {
+				case SND_PCM_FORMAT_FLOAT_LE: return SampleFormat::Float32;
+				case SND_PCM_FORMAT_S32_LE:   return SampleFormat::Int32;
+				case SND_PCM_FORMAT_S24_3LE:  return SampleFormat::Int24;
+				case SND_PCM_FORMAT_S16_LE:   return SampleFormat::Int16;
+				default:                      return SampleFormat::Float32;
+			}
 		}
-    };
 
-    switch (f)
-    {
-        case SND_PCM_FORMAT_FLOAT_LE:    push(mka::audio::Format::Float32); return true;
-        case SND_PCM_FORMAT_FLOAT64_LE:  push(mka::audio::Format::Float64); return true;
-        case SND_PCM_FORMAT_S16_LE:      push(mka::audio::Format::Int16);   return true;
-        case SND_PCM_FORMAT_S24_LE:      push(mka::audio::Format::Int24);   return true;
-        case SND_PCM_FORMAT_S32_LE:      push(mka::audio::Format::Int32);   return true;
-        default: return false;
-    }
-}
+		size_t bytesPerSample(snd_pcm_format_t fmt) {
+			switch (fmt) {
+				case SND_PCM_FORMAT_FLOAT_LE: return 4;
+				case SND_PCM_FORMAT_S32_LE:   return 4;
+				case SND_PCM_FORMAT_S24_3LE:  return 3;
+				case SND_PCM_FORMAT_S16_LE:   return 2;
+				default:                      return 4;
+			}
+		}
 
-mka::audio::Result setup_pcm(
-		snd_pcm_t**			handle, 
-		const char*			device_name, 
-		snd_pcm_stream_t	stream_mode, 
-		uint32_t			channels,
-		int&				descriptor_count,
-		uint32_t&			samplerate,
-		uint32_t			buffer_size,
-		mka::audio::Format	fmt) {
+		float pcmToFloat(const uint8_t* src, snd_pcm_format_t fmt) {
+			switch (fmt) {
+				case SND_PCM_FORMAT_FLOAT_LE:
+					return *reinterpret_cast<const float*>(src);
+				case SND_PCM_FORMAT_S32_LE: {
+					int32_t v = *reinterpret_cast<const int32_t*>(src);
+					return static_cast<float>(v) / 2147483648.0f;
+				}
+				case SND_PCM_FORMAT_S24_3LE: {
+					int32_t v = src[0] | (src[1] << 8) | (src[2] << 16);
+					if (v & 0x800000) v |= static_cast<int32_t>(0xFF000000u);
+					return static_cast<float>(v) / 8388608.0f;
+				}
+				case SND_PCM_FORMAT_S16_LE: {
+					int16_t v = *reinterpret_cast<const int16_t*>(src);
+					return static_cast<float>(v) / 32768.0f;
+				}
+				default: return 0.0f;
+			}
+		}
 
-	// open the output device
-	ALSA_CHECK(snd_pcm_open(handle, device_name, stream_mode, SND_PCM_NONBLOCK), mka::audio::Error::DeviceOpenFailed);
-				
-	// setup output hardware
-	snd_pcm_hw_params_t* hw = nullptr;
-	snd_pcm_hw_params_alloca(&hw);
-	ALSA_CHECK(snd_pcm_hw_params_any(*handle, hw), mka::audio::Error::HardwareSetupFailed);
-	snd_pcm_uframes_t	bufferSize	= buffer_size * 2;
-	snd_pcm_uframes_t	periodSize	= buffer_size;	
-	snd_pcm_format_t	desired_format = select_format(fmt);
-	snd_pcm_format_t	real_format = {};
-
-	ALSA_CHECK(snd_pcm_hw_params_set_access(*handle, hw, SND_PCM_ACCESS_MMAP_NONINTERLEAVED), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_format(*handle, hw, desired_format), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_get_format(hw, &real_format), mka::audio::Error::SetupHardwareParameterFailed);
-
-	if(real_format != desired_format) {
-		return mka::audio::Result { mka::audio::Error::SetupHardwareParameterFailed, "Audio format is not supported" };
+		void floatToPcm(float sample, uint8_t* dst, snd_pcm_format_t fmt) {
+			sample = std::clamp(sample, -1.0f, 1.0f);
+			switch (fmt) {
+				case SND_PCM_FORMAT_FLOAT_LE:
+					*reinterpret_cast<float*>(dst) = sample;
+					break;
+				case SND_PCM_FORMAT_S32_LE: {
+					// 2147483647.0f n'est pas exactement représentable en float32 : le
+					// compilateur l'arrondit à 2147483648.0f (2^31), ce qui déborde
+					// INT32_MAX pour sample == 1.0 et cause un undefined behavior au
+					// cast (wraparound audible en clics/distorsion). On passe par un
+					// calcul en double, puis on clamp explicitement avant le cast final.
+					double scaled = static_cast<double>(sample) * 2147483647.0;
+					int64_t clamped = std::clamp(
+						static_cast<int64_t>(scaled),
+						static_cast<int64_t>(INT32_MIN),
+						static_cast<int64_t>(INT32_MAX)
+					);
+					*reinterpret_cast<int32_t*>(dst) = static_cast<int32_t>(clamped);
+					break;
+				}
+				case SND_PCM_FORMAT_S24_3LE: {
+					int32_t v = static_cast<int32_t>(sample * 8388607.0f);
+					dst[0] = static_cast<uint8_t>(v & 0xFF);
+					dst[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+					dst[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+					break;
+				}
+				case SND_PCM_FORMAT_S16_LE: {
+					int16_t v = static_cast<int16_t>(sample * 32767.0f);
+					*reinterpret_cast<int16_t*>(dst) = v;
+					break;
+				}
+				default: break;
+			}
+		}
 	}
 
-	ALSA_CHECK(snd_pcm_hw_params_set_channels(*handle, hw, channels), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_rate_near(*handle, hw, &samplerate, nullptr), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_buffer_size_near(*handle, hw, &bufferSize), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_hw_params_set_period_size_near(*handle, hw, &periodSize, nullptr), mka::audio::Error::SetupHardwareParameterFailed);	
-	ALSA_CHECK(snd_pcm_hw_params(*handle, hw), mka::audio::Error::HardwareSetupFailed);
-	// setup output software	
-	snd_pcm_sw_params_t* sw = nullptr;
-	snd_pcm_sw_params_alloca(&sw);
-
-	ALSA_CHECK(snd_pcm_sw_params_current(*handle, sw), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_sw_params_set_start_threshold(*handle, sw, buffer_size), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_sw_params_set_avail_min(*handle, sw, buffer_size), mka::audio::Error::SetupHardwareParameterFailed);
-	ALSA_CHECK(snd_pcm_sw_params(*handle, sw), mka::audio::Error::SetupHardwareParameterFailed);
-	
-	// poll descriptors count
-	descriptor_count = snd_pcm_poll_descriptors_count(*handle);
-
-	if(descriptor_count < 0) {
-		logAlsaError("snd_pcm_poll_descriptors_count", descriptor_count);
-		return mka::audio::Result {mka::audio::Error::PollSetupFailed, snd_strerror(descriptor_count)};
-	}
-
-	return mka::audio::Ok;
-}
-
-bool begin(
-		snd_pcm_t* handle,
-		const snd_pcm_channel_area_t **areas,
-		snd_pcm_uframes_t buffer_size,
-		uint32_t channels,
-		snd_pcm_uframes_t& offset,
-		snd_pcm_uframes_t& frames, std::span<float*> ptrs) {
-
-	if(channels == 0) {
-		return false;
-	}
-
-	snd_pcm_sframes_t avail = snd_pcm_avail_update(handle);
-
-	if(avail < 0) {
-		ALSA_LOG_ERROR(snd_pcm_recover(handle, avail, 1));
-		return false;
-	}
-
-	frames = std::min(static_cast<snd_pcm_uframes_t>(avail), buffer_size);
-
-	if(frames == 0) {
-		return false;
-	}
-
-	int err = snd_pcm_mmap_begin(handle, areas, &offset, &frames);
-
-	if(err < 0) {
-		ALSA_LOG_ERROR(snd_pcm_recover(handle, err, 1));
-		return false;
-	}
-
-	for(uint32_t channel = 0; channel < channels; ++channel) {
-		ptrs[channel] = reinterpret_cast<float*>(
-			static_cast<char*>(areas[channel]->addr)
-			+ (areas[channel]->first / 8)
-			+ offset * (areas[channel]->step / 8)
-		);
-	}
-
-	return true;
-}
-
-export int list_dev() {
-    int card = -1;
-
-    if (snd_card_next(&card) < 0 || card < 0) {
-        std::cerr << "Aucune carte ALSA trouvée\n";
-        return 1;
-    }
-
-    while (card >= 0) {
-
-        snd_ctl_t* ctl = nullptr;
-        char card_name[32];
-        sprintf(card_name, "hw:%d", card);
-
-        if (snd_ctl_open(&ctl, card_name, 0) < 0) {
-            std::cerr << "Impossible d'ouvrir " << card_name << "\n";
-            snd_card_next(&card);
-            continue; // ⚠️ on ne ferme pas ctl ici
-        }
-
-        snd_ctl_card_info_t* info;
-        snd_ctl_card_info_alloca(&info);
-
-        if (snd_ctl_card_info(ctl, info) == 0) {
-            std::cout << "Carte " << card << " : "
-                      << snd_ctl_card_info_get_name(info)
-                      << "\n";
-        }
-
-        int device = -1;
-
-        while (true) {
-            if (snd_ctl_pcm_next_device(ctl, &device) < 0)
-                break;
-
-            if (device < 0)
-                break;
-
-            snd_pcm_info_t* pcm_info;
-            snd_pcm_info_alloca(&pcm_info);
-
-            snd_pcm_info_set_device(pcm_info, device);
-            snd_pcm_info_set_subdevice(pcm_info, 0);
-
-            snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_PLAYBACK);
-            if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
-                std::cout << "  Device " << device
-                          << " (Playback): "
-                          << snd_pcm_info_get_name(pcm_info)
-                          << "\n";
-            }
-
-            snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_CAPTURE);
-            if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
-                std::cout << "  Device " << device
-                          << " (Capture): "
-                          << snd_pcm_info_get_name(pcm_info)
-                          << "\n";
-            }
-        }
-
-        snd_ctl_close(ctl);
-
-        // ⚠️ TRÈS IMPORTANT
-        snd_card_next(&card);
-    }
-
-    return 0;
-
-}
-//---------------------//
-export namespace mka::audio {
-
-	class ALSA final: public AbstractCoreAudio {
-	
+	// deviceID accepte la syntaxe standard ALSA :
+	//   "hw:2,0"      -> accès direct exclusif, latence minimale, vire tout autre
+	//                     consommateur (PipeWire/PulseAudio inclus) de la carte.
+	//                     Le format PCM natif est négocié automatiquement
+	//                     (Float32 -> Int32 -> Int24 -> Int16), donc fonctionne
+	//                     même sur du matériel qui ne parle pas float nativement.
+	//   "plughw:2,0"  -> accès converti/partagé, coexiste avec le reste du système
+	//                     (PipeWire, dmix), conversion de format/rate automatique
+	//                     déjà assurée par le plugin ALSA.
+	//   "default"     -> device par défaut du système, toujours partagé.
+	export class ALSA final : public Device {
 	public:
 		ALSA() = default;
-		
-		std::vector<Device> devicesList() {
-			return std::vector<Device>();
+		~ALSA() override { closeNoLock(); }
+
+		struct DeviceDescriptor {
+			std::string hardwareID; // ex: "hw:2,0"
+			std::string name;       // ex: "Focusrite Scarlett 2i2 USB"
+
+			[[nodiscard]] std::string sharedID() const { return "plug" + hardwareID; }
+		};
+
+		// Thread-safe : aucun état partagé muté, retour par valeur.
+		[[nodiscard]] std::vector<DeviceDescriptor> enumerateDevices() const {
+			std::vector<DeviceDescriptor> devices;
+
+			int card = -1;
+			while (snd_card_next(&card) >= 0 && card >= 0) {
+				const std::string ctlName = "hw:" + std::to_string(card);
+
+				snd_ctl_t* ctl = nullptr;
+				if (snd_ctl_open(&ctl, ctlName.c_str(), 0) < 0) continue;
+
+				snd_ctl_card_info_t* cardInfo = nullptr;
+				snd_ctl_card_info_alloca(&cardInfo);
+				if (snd_ctl_card_info(ctl, cardInfo) < 0) {
+					snd_ctl_close(ctl);
+					continue;
+				}
+				const std::string cardName = snd_ctl_card_info_get_name(cardInfo);
+
+				int device = -1;
+				while (snd_ctl_pcm_next_device(ctl, &device) >= 0 && device >= 0) {
+					devices.push_back({
+						.hardwareID = "hw:" + std::to_string(card) + "," + std::to_string(device),
+						.name = cardName
+					});
+				}
+				snd_ctl_close(ctl);
+			}
+			return devices;
 		}
-		
-		Result open(const Config& cfg) override {
-			config = cfg;
-			
-			// poll descriptors count
-			
-			if(config.outChannels > 0) {
 
-				Result ret = setup_pcm(
-						&playback, 
-						config.name.c_str(),
-						SND_PCM_STREAM_PLAYBACK,
-						config.outChannels,
-						outCount,
-						config.samplerate,
-						config.bufferSize, 
-						config.audioFormat
-				);
-				
-				if(!ret.ok()) {
-					return ret;
+		[[nodiscard]] Result open(const DeviceConfig& cfg) override {
+			std::lock_guard lock(controlMutex_);
+			return openNoLock(cfg);
+		}
+
+		[[nodiscard]] Result close() override {
+			std::lock_guard lock(controlMutex_);
+			return closeNoLock();
+		}
+
+		[[nodiscard]] Result start() override {
+			std::lock_guard lock(controlMutex_);
+			return startNoLock();
+		}
+
+		[[nodiscard]] Result stop() override {
+			std::lock_guard lock(controlMutex_);
+			return stopNoLock();
+		}
+
+		// Atomique bout-en-bout : un seul verrou tenu sur toute la séquence
+		// stop -> close -> open, aucune fenêtre où un autre thread de contrôle
+		// pourrait s'insérer entre deux étapes.
+		[[nodiscard]] Result reopen(const DeviceConfig& cfg) override {
+			std::lock_guard lock(controlMutex_);
+			if (state_.load(std::memory_order_acquire) == State::Running) {
+				if (auto r = stopNoLock(); !r) return r;
+			}
+			if (state_.load(std::memory_order_acquire) != State::Closed) {
+				if (auto r = closeNoLock(); !r) return r;
+			}
+			return openNoLock(cfg);
+		}
+
+		// Télémétrie temps réel safe : détail input/output plutôt qu'un
+		// compteur agrégé qui masquerait l'origine du glitch.
+		[[nodiscard]] size_t xrunCount() const noexcept {
+			return inputXrunCount_.load(std::memory_order_relaxed)
+			     + outputXrunCount_.load(std::memory_order_relaxed);
+		}
+		[[nodiscard]] size_t inputXrunCount() const noexcept {
+			return inputXrunCount_.load(std::memory_order_relaxed);
+		}
+		[[nodiscard]] size_t outputXrunCount() const noexcept {
+			return outputXrunCount_.load(std::memory_order_relaxed);
+		}
+		[[nodiscard]] size_t suspendRecoveryCount() const noexcept {
+			return suspendRecoveryCount_.load(std::memory_order_relaxed);
+		}
+
+		[[nodiscard]] Result lastError() const {
+			std::lock_guard lock(lastErrorMutex_);
+			return lastError_;
+		}
+
+		// Diagnostic honnête : l'appelant peut savoir si la priorité temps
+		// réel a réellement été obtenue par le thread audio, pour avertir
+		// l'utilisateur si ce n'est pas le cas (permissions systeme).
+		[[nodiscard]] bool isRealtimeThread() const noexcept {
+			return realtimeThreadActive_.load(std::memory_order_relaxed);
+		}
+		[[nodiscard]] bool isMemoryLocked() const noexcept {
+			return memoryLocked_.load(std::memory_order_relaxed);
+		}
+
+	private:
+		void setLastError(Result r) {
+			std::lock_guard lock(lastErrorMutex_);
+			lastError_ = std::move(r);
+		}
+		void clearLastError() {
+			std::lock_guard lock(lastErrorMutex_);
+			lastError_ = mka::audio::Ok;
+		}
+
+		[[nodiscard]] Result openNoLock(const DeviceConfig& cfg) {
+			if (state_.load(std::memory_order_acquire) != State::Closed) {
+				return Result{ Error::WouldBlock, "Device must be closed before opening." };
+			}
+			if (cfg.inputChannels == 0 && cfg.outputChannels == 0) {
+				return Result{ Error::GenericError, "No input or output channels requested." };
+			}
+			if (cfg.sampleRate == 0) {
+				return Result{ Error::GenericError, "sampleRate cannot be 0." };
+			}
+			if (cfg.bufferSize == 0) {
+				return Result{ Error::GenericError, "bufferSize cannot be 0." };
+			}
+
+			uint32_t captureRate = 0, capturePeriod = 0;
+			uint32_t playbackRate = 0, playbackPeriod = 0;
+			snd_pcm_format_t captureFmt  = SND_PCM_FORMAT_FLOAT_LE;
+			snd_pcm_format_t playbackFmt = SND_PCM_FORMAT_FLOAT_LE;
+
+			if (cfg.inputChannels > 0) {
+				if (auto r = openStream(captureHandle_, cfg, SND_PCM_STREAM_CAPTURE,
+				                          cfg.inputChannels, captureRate, capturePeriod, captureFmt); !r) {
+					closeNoLock();
+					return r;
+				}
+			}
+			if (cfg.outputChannels > 0) {
+				if (auto r = openStream(playbackHandle_, cfg, SND_PCM_STREAM_PLAYBACK,
+				                          cfg.outputChannels, playbackRate, playbackPeriod, playbackFmt); !r) {
+					closeNoLock();
+					return r;
 				}
 			}
 
-			if(config.inChannels > 0) {
-				Result ret = setup_pcm(
-						&capture,
-						config.name.c_str(), 
-						SND_PCM_STREAM_CAPTURE, 
-						config.inChannels, 
-						inCount, 
-						config.samplerate, 
-						config.bufferSize, 
-						config.audioFormat
-				);
-
-				if(!ret.ok()) {
-					return ret;
+			// Si les deux flux sont ouverts, ils DOIVENT converger vers le même
+			// rate/period. Sinon on refuse plutôt que d'écraser silencieusement.
+			// Les formats natifs, eux, peuvent légitimement différer entre
+			// capture et playback (deux convertisseurs physiques distincts).
+			uint32_t negotiatedRate, negotiatedPeriod;
+			if (captureHandle_ && playbackHandle_) {
+				if (captureRate != playbackRate || capturePeriod != playbackPeriod) {
+					closeNoLock();
+					return Result{ Error::DeviceOpenFailed,
+						"Capture and playback streams negotiated different rate/period; "
+						"this device configuration is not supported." };
 				}
+				negotiatedRate = captureRate;
+				negotiatedPeriod = capturePeriod;
+			} else if (captureHandle_) {
+				negotiatedRate = captureRate;
+				negotiatedPeriod = capturePeriod;
+			} else {
+				negotiatedRate = playbackRate;
+				negotiatedPeriod = playbackPeriod;
 			}
 
-			const size_t totalCount = outCount + inCount;
+			alsaCaptureFormat_  = captureFmt;
+			alsaPlaybackFormat_ = playbackFmt;
 
-			if(totalCount <= 0) {
-				return Result{Error::PollSetupFailed, "Invalid poll descriptor count"};
+			info_.id              = cfg.deviceID;
+			info_.name             = cfg.deviceID;
+			info_.sampleRate       = negotiatedRate;
+			info_.bufferSize       = negotiatedPeriod;
+			info_.inputChannels    = cfg.inputChannels;
+			info_.outputChannels   = cfg.outputChannels;
+			// Priorité au format de sortie (contrainte la plus souvent pertinente
+			// pour l'appelant), sinon celui de la capture si pas de sortie.
+			info_.sampleFormat = cfg.outputChannels > 0
+				? toSampleFormat(playbackFmt) : toSampleFormat(captureFmt);
+
+			try {
+				allocateBuffers(cfg.inputChannels, cfg.outputChannels, negotiatedPeriod);
+			} catch (const std::exception&) {
+				closeNoLock();
+				return Result{ Error::GenericError, "Failed to allocate audio buffers (out of memory)." };
 			}
 
-			pfds.resize(totalCount);
-			
-			if(config.outChannels > 0) {
-				// poll descriptors out
-				ALSA_CHECK(snd_pcm_poll_descriptors(playback, pfds.data(), outCount), Error::PollDescriptorsFailed);
-			}
+			clearLastError();
+			inputXrunCount_.store(0, std::memory_order_relaxed);
+			outputXrunCount_.store(0, std::memory_order_relaxed);
+			suspendRecoveryCount_.store(0, std::memory_order_relaxed);
 
-			if(config.inChannels > 0) { 
-				// poll descriptors in
-				ALSA_CHECK(snd_pcm_poll_descriptors(capture, pfds.data() + outCount, inCount), Error::PollDescriptorsFailed);
-			}
-
-			outPtrs.resize(config.outChannels, nullptr);
-			inPtrs.resize(config.inChannels, nullptr);
-			
-			mlockall(MCL_CURRENT | MCL_FUTURE);			
-			
+			state_.store(State::Open, std::memory_order_release);
 			return mka::audio::Ok;
 		}
-		
-		Result close() override {
-			
-			munlockall();
 
-			if(playback) {
-				ALSA_LOG_ERROR(snd_pcm_drain(playback));
-				ALSA_LOG_ERROR(snd_pcm_close(playback));
-				playback = nullptr;
+	[[nodiscard]] Result startNoLock() {
+		if (state_.load(std::memory_order_acquire) != State::Open) {
+			return Result{ Error::WouldBlock, "Device must be open before starting." };
+		}
+		if (captureHandle_) {
+			if (snd_pcm_prepare(captureHandle_) < 0) {
+				return Result{ Error::GenericError, "snd_pcm_prepare failed on capture stream." };
 			}
-			
-			if(capture) {
-				ALSA_LOG_ERROR(snd_pcm_drain(capture));
-				ALSA_LOG_ERROR(snd_pcm_close(capture));
-				capture = nullptr;
+		}
+		if (playbackHandle_) {
+			if (snd_pcm_prepare(playbackHandle_) < 0) {
+				return Result{ Error::GenericError, "snd_pcm_prepare failed on playback stream." };
 			}
+		}
+
+		// Latence mesurable seulement une fois le flux préparé/en cours.
+		info_.inputLatencyMs  = queryLatencyMs(captureHandle_, info_.sampleRate);
+		info_.outputLatencyMs = queryLatencyMs(playbackHandle_, info_.sampleRate);
+
+		clearLastError();
+		running_.store(true, std::memory_order_release);
+		audioThread_ = std::thread(&ALSA::audioLoop, this);
+
+		state_.store(State::Running, std::memory_order_release);
+		return mka::audio::Ok;
+	}
+
+		[[nodiscard]] Result openStream(snd_pcm_t*& handle, const DeviceConfig& cfg,
+		                                  snd_pcm_stream_t stream, uint32_t channels,
+		                                  uint32_t& outRate, uint32_t& outPeriod,
+		                                  snd_pcm_format_t& outFormat) {
+			if (snd_pcm_open(&handle, cfg.deviceID.c_str(), stream, 0) < 0) {
+				return Result{ Error::DeviceOpenFailed,
+					"snd_pcm_open failed. Verifie deviceID (hw:X,Y / plughw:X,Y / default)." };
+			}
+
+			snd_pcm_hw_params_t* hw = nullptr;
+			snd_pcm_hw_params_alloca(&hw);
+			snd_pcm_hw_params_any(handle, hw);
+			snd_pcm_hw_params_set_access(handle, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
+
+			// Négociation de format : on essaie chaque candidat jusqu'à ce que
+			// la carte en accepte un. Fonctionne aussi bien en hw: (natif) qu'en
+			// plughw: (déjà converti par ALSA de toute facon).
+			snd_pcm_format_t chosen = SND_PCM_FORMAT_UNKNOWN;
+			for (auto fmt : kFormatCandidates) {
+				if (snd_pcm_hw_params_test_format(handle, hw, fmt) == 0) {
+					chosen = fmt;
+					break;
+				}
+			}
+			if (chosen == SND_PCM_FORMAT_UNKNOWN) {
+				snd_pcm_close(handle);
+				handle = nullptr;
+				return Result{ Error::DeviceOpenFailed, "Aucun format PCM candidat supporte par ce device." };
+			}
+			snd_pcm_hw_params_set_format(handle, hw, chosen);
+			outFormat = chosen;
+
+			if (snd_pcm_hw_params_set_channels(handle, hw, channels) < 0) {
+				snd_pcm_close(handle);
+				handle = nullptr;
+				return Result{ Error::DeviceOpenFailed, "Nombre de canaux non supporte par ce device." };
+			}
+
+			uint32_t rate = cfg.sampleRate;
+			if (snd_pcm_hw_params_set_rate_near(handle, hw, &rate, nullptr) < 0) {
+				snd_pcm_close(handle);
+				handle = nullptr;
+				return Result{ Error::DeviceOpenFailed, "sampleRate rejected by driver." };
+			}
+
+			snd_pcm_uframes_t period = cfg.bufferSize;
+			if (snd_pcm_hw_params_set_period_size_near(handle, hw, &period, nullptr) < 0) {
+				snd_pcm_close(handle);
+				handle = nullptr;
+				return Result{ Error::DeviceOpenFailed, "bufferSize rejected by driver." };
+			}
+
+			// Borne explicitement le nombre de périodes du ring buffer. Sans ça,
+			// certains drivers choisissent 4-8 périodes par défaut, multipliant
+			// la latence réelle sans que l'appelant ne le sache.
+			unsigned int periods = kPeriodsCount;
+			snd_pcm_hw_params_set_periods_near(handle, hw, &periods, nullptr);
+
+			if (snd_pcm_hw_params(handle, hw) < 0) {
+				snd_pcm_close(handle);
+				handle = nullptr;
+				return Result{ Error::DeviceOpenFailed, "snd_pcm_hw_params rejected by driver." };
+			}
+
+			outRate   = rate;
+			outPeriod = static_cast<uint32_t>(period);
 			return mka::audio::Ok;
 		}
 
-	protected:
+		static double queryLatencyMs(snd_pcm_t* handle, uint32_t sampleRate) {
+			if (!handle || sampleRate == 0) return 0.0;
+			snd_pcm_sframes_t delayFrames = 0;
+			if (snd_pcm_delay(handle, &delayFrames) < 0) return 0.0;
+			return 1000.0 * static_cast<double>(delayFrames) / sampleRate;
+		}
 
-		void run() override {
+		void allocateBuffers(uint32_t inCh, uint32_t outCh, uint32_t frames) {
+			inputPlanar_.assign(static_cast<size_t>(inCh) * frames, 0.0f);
+			outputPlanar_.assign(static_cast<size_t>(outCh) * frames, 0.0f);
+			inputChannelPtrs_.resize(inCh);
+			outputChannelPtrs_.resize(outCh);
+			for (uint32_t c = 0; c < inCh; ++c)
+				inputChannelPtrs_[c] = &inputPlanar_[static_cast<size_t>(c) * frames];
+			for (uint32_t c = 0; c < outCh; ++c)
+				outputChannelPtrs_[c] = &outputPlanar_[static_cast<size_t>(c) * frames];
 
-			const bool hasPlayback = config.outChannels > 0;
-			const bool hasCapture  = config.inChannels  > 0;
-			bool playbackStarted = false;
-	
-			const snd_pcm_channel_area_t* outAreas = nullptr;
-			const snd_pcm_channel_area_t* inAreas  = nullptr;
-			snd_pcm_uframes_t framesPlayback = 0;
-			snd_pcm_uframes_t framesCapture  = 0;
-			snd_pcm_uframes_t playbackOffset = 0;
-			snd_pcm_uframes_t captureOffset  = 0;
+			// Buffers d'octets bruts : la taille dépend du format réellement
+			// négocié (S24_3LE fait 3 octets, pas 4 comme un float).
+			captureScratch_.assign(
+				static_cast<size_t>(inCh) * frames * bytesPerSample(alsaCaptureFormat_), 0);
+			playbackScratch_.assign(
+				static_cast<size_t>(outCh) * frames * bytesPerSample(alsaPlaybackFormat_), 0);
+		}
 
-			if(hasPlayback) {
-		        ALSA_LOG_ERROR(snd_pcm_prepare(playback));
-		        playbackStarted = false;
-		    }
+		enum class Recovery { Recovered, Fatal };
+		enum class StreamKind { Input, Output };
 
-		    if(hasCapture) {
-		        ALSA_LOG_ERROR(snd_pcm_prepare(capture));
-		        ALSA_LOG_ERROR(snd_pcm_start(capture));
-		    }
-
-			while(running.load(std::memory_order_acquire)) {
-
-				if(poll(pfds.data(), pfds.size(), -1) <= 0) {
-					continue;
+		Recovery recoverFromError(snd_pcm_t* handle, int errCode, StreamKind kind, const char* streamLabel) {
+			if (errCode == -EPIPE) {
+				if (kind == StreamKind::Input)
+					inputXrunCount_.fetch_add(1, std::memory_order_relaxed);
+				else
+					outputXrunCount_.fetch_add(1, std::memory_order_relaxed);
+				snd_pcm_prepare(handle);
+				return Recovery::Recovered;
+			}
+			if (errCode == -ESTRPIPE) {
+				suspendRecoveryCount_.fetch_add(1, std::memory_order_relaxed);
+				int attempts = 0;
+				int resumeResult;
+				while ((resumeResult = snd_pcm_resume(handle)) == -EAGAIN && attempts < 200) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+					++attempts;
 				}
-
-				unsigned short revOut = 0, revIn = 0;
-
-				if(hasPlayback) {
-					ALSA_LOG_ERROR(snd_pcm_poll_descriptors_revents(playback, pfds.data(), outCount, &revOut));
+				if (resumeResult < 0) {
+					snd_pcm_prepare(handle);
 				}
+				return Recovery::Recovered;
+			}
+			std::string msg = std::string("ALSA fatal error on ") + streamLabel
+				+ " stream: " + snd_strerror(errCode);
+			setLastError(Result{ Error::GenericError, msg });
+			return Recovery::Fatal;
+		}
 
-				if(hasCapture) {
-					ALSA_LOG_ERROR(snd_pcm_poll_descriptors_revents(capture, pfds.data() + outCount, inCount, &revIn));
-				}
+		void audioLoop() {
+			// Priorité RT vérifiée, pas juste tentée dans le vide.
+			{
+				sched_param sch{};
+				sch.sched_priority = 50;
+				const int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sch);
+				realtimeThreadActive_.store(rc == 0, std::memory_order_relaxed);
+			}
 
-				if((revOut | revIn) & POLLERR) {
-					if(hasPlayback) {
-						ALSA_LOG_ERROR(snd_pcm_recover(playback, -EPIPE, 1));
-					}
+			// Verrouille les pages mémoire du process pour éviter les page
+			// faults en plein rendu audio. Best-effort, non bloquant en cas
+			// d'échec (permissions insuffisantes = comportement dégradé).
+			{
+				const int rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+				memoryLocked_.store(rc == 0, std::memory_order_relaxed);
+			}
 
-					if(hasCapture) {
-						ALSA_LOG_ERROR(snd_pcm_recover(capture,  -EPIPE, 1));
-					}
+#if defined(__x86_64__) || defined(__i386__)
+			// Flush-to-zero / denormals-are-zero : protège n'importe quel
+			// callback utilisateur contre les CPU spikes dus aux dénormaux
+			// (ex: queue de reverb qui décroît vers zéro). x86/x64 uniquement.
+			_MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+			_MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
 
-					continue;
-				}
+			pthread_setname_np(pthread_self(), "mka-audio-rt");
 
+			const uint32_t inCh   = info_.inputChannels;
+			const uint32_t outCh  = info_.outputChannels;
+			const uint32_t frames = info_.bufferSize;
+			const size_t inBps  = bytesPerSample(alsaCaptureFormat_);
+			const size_t outBps = bytesPerSample(alsaPlaybackFormat_);
 
-				bool readyPlayback = hasPlayback && begin(playback, &outAreas, config.bufferSize, config.outChannels, playbackOffset, framesPlayback, outPtrs);
-				bool readyCapture  = hasCapture  && (revIn  & POLLIN) && begin(capture, &inAreas, config.bufferSize, config.inChannels, captureOffset, framesCapture, inPtrs);
+			while (running_.load(std::memory_order_acquire)) {
 
-				if(!readyPlayback && !readyCapture) {
-					continue;
-				}
-				
-				snd_pcm_uframes_t frames = config.bufferSize;
-
-				if(readyPlayback) frames = std::min(frames, framesPlayback);
-				if(readyCapture)  frames = std::min(frames, framesCapture);
-
-				if(frames == 0) continue;
-
-				mka::audio::Block block {
-					.samplerate  = config.samplerate,
-					.outChannels = readyPlayback ? config.outChannels : 0,
-				    .inChannels  = readyCapture  ? config.inChannels  : 0,
-					.frames      = static_cast<uint32_t>(frames),
-					.out         = readyPlayback ? outPtrs.data() : nullptr,
-					.in          = readyCapture  ? inPtrs.data()  : nullptr
-		        };
-
-				if(callback) {
-					callback(block);
-				} else if(readyPlayback) {
-					for(uint32_t ch = 0; ch < block.outChannels; ++ch) {
-		                std::memset(block.out[ch], 0, block.frames * sizeof(float));
-					}
-				}
-
-				if(readyPlayback) {
-					snd_pcm_sframes_t committed = snd_pcm_mmap_commit(playback, playbackOffset, frames);
-					if(committed < 0) {
-						logAlsaError("snd_pcm_mmap_commit(playback)", static_cast<int>(committed));
-						ALSA_LOG_ERROR(snd_pcm_recover(playback, static_cast<int>(committed), 1));
-						playbackStarted = false;
+				if (captureHandle_) {
+					snd_pcm_sframes_t got = snd_pcm_readi(captureHandle_, captureScratch_.data(), frames);
+					if (got < 0) {
+						if (recoverFromError(captureHandle_, static_cast<int>(got),
+						                       StreamKind::Input, "capture") == Recovery::Fatal) {
+							running_.store(false, std::memory_order_release);
+							state_.store(State::Open, std::memory_order_release);
+							break;
+						}
 						continue;
 					}
-					
-					if(static_cast<snd_pcm_uframes_t>(committed) != frames) {
-						std::fprintf(stderr, "[ALSA] short playback commit: requested=%lu committed=%ld\n",
-							static_cast<unsigned long>(frames),
-							static_cast<long>(committed));
-					}
 
-					if(!playbackStarted) {
-						snd_pcm_state_t state = snd_pcm_state(playback);
-						if(state == SND_PCM_STATE_PREPARED) {
-							int startErr = snd_pcm_start(playback);
-							if(startErr < 0) {
-								logAlsaError("snd_pcm_start(playback)", startErr);
-								ALSA_LOG_ERROR(snd_pcm_recover(playback, startErr, 1));
-							} else {
-								playbackStarted = true;
-							}
-						} else if(state == SND_PCM_STATE_RUNNING) {
-							playbackStarted = true;
+					for (uint32_t f = 0; f < static_cast<uint32_t>(got); ++f) {
+						for (uint32_t c = 0; c < inCh; ++c) {
+							const uint8_t* src = captureScratch_.data()
+								+ (static_cast<size_t>(f) * inCh + c) * inBps;
+							inputChannelPtrs_[c][f] = pcmToFloat(src, alsaCaptureFormat_);
 						}
 					}
 				}
 
-				if(readyCapture) {
-					snd_pcm_sframes_t committed = snd_pcm_mmap_commit(capture, captureOffset, frames);
-					if(committed < 0) {
-						logAlsaError("snd_pcm_mmap_commit(capture)", static_cast<int>(committed));
-						ALSA_LOG_ERROR(snd_pcm_recover(capture, static_cast<int>(committed), 1));
+				if (callback_) {
+					Buffer buffer{
+						.inputs      = inputChannelPtrs_.data(),
+						.outputs     = outputChannelPtrs_.data(),
+						.inputCount  = inCh,
+						.outputCount = outCh,
+						.frames      = frames,
+					};
+					try {
+						callback_(buffer, userData_);
+					} catch (const std::exception& e) {
+						setLastError(Result{ Error::GenericError,
+							std::string("Exception in audio callback: ") + e.what() });
+					} catch (...) {
+						setLastError(Result{ Error::GenericError,
+							"Unknown exception in audio callback." });
+					}
+				}
+
+				if (playbackHandle_) {
+					for (uint32_t f = 0; f < frames; ++f) {
+						for (uint32_t c = 0; c < outCh; ++c) {
+							uint8_t* dst = playbackScratch_.data()
+								+ (static_cast<size_t>(f) * outCh + c) * outBps;
+							floatToPcm(outputChannelPtrs_[c][f], dst, alsaPlaybackFormat_);
+						}
+					}
+
+					snd_pcm_sframes_t wrote = snd_pcm_writei(playbackHandle_, playbackScratch_.data(), frames);
+					if (wrote < 0) {
+						if (recoverFromError(playbackHandle_, static_cast<int>(wrote),
+						                       StreamKind::Output, "playback") == Recovery::Fatal) {
+							running_.store(false, std::memory_order_release);
+							state_.store(State::Open, std::memory_order_release);
+							break;
+						}
 					}
 				}
 			}
 
-			if(hasPlayback) {
-				ALSA_LOG_ERROR(snd_pcm_drop(playback));
-			}
-		
-			if(hasCapture) {
-				ALSA_LOG_ERROR(snd_pcm_drop(capture));
+			if (memoryLocked_.load(std::memory_order_relaxed)) {
+				munlockall();
+				memoryLocked_.store(false, std::memory_order_relaxed);
 			}
 		}
 
+		Result stopNoLock() {
+			running_.store(false, std::memory_order_release);
+			if (audioThread_.joinable()) {
+				audioThread_.join();
+			}
+			// Ne repasse Running -> Open que si on était vraiment en train de
+			// tourner ; compare_exchange évite d'écraser un état Closed si
+			// closeNoLock() a déjà avancé entre-temps.
+			State expected = State::Running;
+			state_.compare_exchange_strong(expected, State::Open, std::memory_order_acq_rel);
+			return mka::audio::Ok;
+		}
 
-	private:
+		Result closeNoLock() {
+			if (state_.load(std::memory_order_acquire) == State::Closed) {
+				return mka::audio::Ok;
+			}
+			stopNoLock();
 
-		snd_pcm_t*			playback = nullptr;
-		snd_pcm_t*			capture	 = nullptr;
+			if (captureHandle_)  { snd_pcm_close(captureHandle_);  captureHandle_ = nullptr; }
+			if (playbackHandle_) { snd_pcm_close(playbackHandle_); playbackHandle_ = nullptr; }
 
-		std::vector<pollfd>	pfds;
-		std::vector<float*>	outPtrs;
-		std::vector<float*>	inPtrs;
+			inputPlanar_.clear();
+			outputPlanar_.clear();
+			inputChannelPtrs_.clear();
+			outputChannelPtrs_.clear();
+			captureScratch_.clear();
+			playbackScratch_.clear();
 
-		int					outCount = 0;
-		int					inCount	 = 0;	
+			state_.store(State::Closed, std::memory_order_release);
+			return mka::audio::Ok;
+		}
+
+		// Nombre de périodes du ring buffer ALSA. 2 = latence minimale sûre
+		// (double-buffering). Pas exposé dans DeviceConfig : pas de besoin
+		// prouvé pour l'instant, donc pas d'ajout à l'interface abstraite.
+		static constexpr unsigned int kPeriodsCount = 2;
+
+		snd_pcm_t* captureHandle_  = nullptr;
+		snd_pcm_t* playbackHandle_ = nullptr;
+
+		snd_pcm_format_t alsaCaptureFormat_  = SND_PCM_FORMAT_FLOAT_LE;
+		snd_pcm_format_t alsaPlaybackFormat_ = SND_PCM_FORMAT_FLOAT_LE;
+
+		std::vector<float> inputPlanar_;
+		std::vector<float> outputPlanar_;
+		std::vector<float*> inputChannelPtrs_;
+		std::vector<float*> outputChannelPtrs_;
+		std::vector<uint8_t> captureScratch_;
+		std::vector<uint8_t> playbackScratch_;
+
+		std::atomic<bool>   running_{false};
+		std::atomic<size_t> inputXrunCount_{0};
+		std::atomic<size_t> outputXrunCount_{0};
+		std::atomic<size_t> suspendRecoveryCount_{0};
+		std::atomic<bool>   realtimeThreadActive_{false};
+		std::atomic<bool>   memoryLocked_{false};
+		std::thread audioThread_;
+
+		std::mutex controlMutex_;
+
+		mutable std::mutex lastErrorMutex_;
+		Result lastError_ = mka::audio::Ok;
 	};
 }

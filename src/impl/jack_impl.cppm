@@ -1,438 +1,246 @@
 module;
-
 #include <jack/jack.h>
-
-#include <algorithm>
 #include <atomic>
-#include <cstring>
-#include <cmath>
+#include <mutex>
 #include <string>
-#include <string_view>
 #include <vector>
-#include <memory>
-#include <span>
+#include <print>
 
 export module audio.jack;
-export import audio.block;
-export import audio.config;
-export import audio.error;
-import audio.constants;
-import audio.realtime_pipeline;
 import audio.abstract_core;
+import audio.error;
+import audio.config;
+import audio.constants;
 
 namespace mka::audio {
-	
-	// JACK callbacks
+
+	int processCallback(jack_nframes_t nframes, void* arg);
 	int sampleRateCallback(jack_nframes_t nframes, void* arg);
 	int bufferSizeCallback(jack_nframes_t nframes, void* arg);
-	int processCallback(jack_nframes_t nframes, void* arg);
 	int xrunCallback(void* arg);
 	void shutdownCallback(void* arg);
 
-	struct JackChannelHandle {
-		Channel			channel;
-		jack_port_t*	port = nullptr;
-	};
-		
-	export class JACK final : public AbstractCoreAudio {
-
+	export class JACK final : public Device {
 	public:
+		JACK() = default;
+		~JACK() override { closeNoLock(); }
 
-		JACK() {
-
-			openedChannels = std::make_unique<JackChannelHandle[]>(constants::MAX_CHANNEL_COUNT);
-			inputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
-			outputBlockStorage = std::make_unique<float[]>(constants::MAX_STATIC_BUFFER_SIZE);
-			inputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
-			outputResampleScratch = std::make_unique<float[]>(constants::MAX_FIFO_SIZE);
-
-			jack_status_t status {};
-			client = jack_client_open("mka_audio_client", JackNoStartServer, &status);
-
-			if(!client) {
-				state.store(State::Closed);
+		static void enumerateDevices() {
+			jack_client_t *client = jack_client_open("DeviceEnumerator", JackNoStartServer, NULL);
+			if (client == NULL) {
+				std::println("Impossible de se connecter à JACK");
 				return;
 			}
-
-			// setting callbacks
-			jack_on_shutdown(client, shutdownCallback, this);
-			jack_set_xrun_callback(client, xrunCallback, this);
-			jack_set_process_callback(client, processCallback, this);
-			jack_set_sample_rate_callback(client, sampleRateCallback, this);
-			jack_set_buffer_size_callback(client, bufferSizeCallback, this);
-
-			// setting JACK API value
-			const uint32_t _jackSampleRate = jack_get_sample_rate(client);
-			const uint32_t _jackBufferSize = jack_get_buffer_size(client);
-	
-			// setting audio engine value
-			jackSampleRate.store(_jackSampleRate);
-			jackBufferSize.store(_jackBufferSize);
-			sampleRate.store(_jackSampleRate);
-			blockSize.store(_jackBufferSize);
-			
-			state.store(State::Stopped);
-		}
-
-		~JACK() override {
-			close();
-		}
-
-		std::vector<ChannelInfo> getChannels() override {
-			if (!client) return {};
-		
-			const char** ports = jack_get_ports(client, nullptr, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical);
-			if (!ports) return {};
-
-			std::vector<ChannelInfo> channels;
-			
-			size_t count = 0;
-			while (ports[count]) ++count;
-
-			channels.reserve(count);	
-			
-			for (int i = 0; ports[i]; ++i) {
-
-				jack_port_t* port = jack_port_by_name(client, ports[i]);
-				if (!port) continue;
-				
-				ChannelInfo info{};
-
-				// Copy the name
-				std::strncpy(info.name, ports[i], sizeof(info.name) - 1);
-				info.name[sizeof(info.name) - 1] = '\0';
-
-				const unsigned long flags = jack_port_flags(port);
-				info.direction = (flags & JackPortIsOutput) 
-									? Direction::In : Direction::Out;
-
-				channels.emplace_back(info);
-			}
-
-			jack_free(ports);
-
-			std::ranges::sort(channels, [](const ChannelInfo& a, const ChannelInfo& b) {
-					return std::strcmp(a.name, b.name) < 0;
-			});
-
-			return channels;
-		}
-
-		Result open(const ChannelInfo channel) override {
-			
-			std::lock_guard<std::mutex> lock(lifecycleMutex);
-			if(!client) {
-				return Result { Error::DeviceOpenFailed, "JACK client unavailable." };
-			}
-			
-			if(state.load() != State::Stopped) {
-				return Result { Error::WouldBlock, "Engine must be stopped before opening a channel." };
-			}
-			
-			size_t chanCount = channelCount.load();
-			if (chanCount >= constants::MAX_CHANNEL_COUNT) {
-				return Result { Error::GenericError, "Maximum channel count reached." };
-			}
-
-			// Check if channel has been already opened
-			for (size_t i = 0; i < chanCount; ++i) {
-		        if (std::strcmp(openedChannels[i].channel.channelInfo.name, channel.name) == 0) {
-				    return Result{ Error::AlreadyExists, "Channel already opened." };
+        
+			// Obtenir les ports audio
+			const char **ports = jack_get_ports(client, nullptr, nullptr, 0);
+			if (ports) {
+				for (int i = 0; ports[i]; i++) {
+					std::println("{}",ports[i]);
 				}
+				jack_free(ports);
+			}
+			
+			jack_client_close(client);
+		}
+
+		[[nodiscard]] Result open(const DeviceConfig& cfg) override {
+			std::lock_guard lock(controlMutex_);
+
+			if (state_.load(std::memory_order_acquire) != State::Closed) {
+				return Result{ Error::WouldBlock, "Device must be closed before opening." };
 			}
 
-			std::string portName = (channel.direction == Direction::In ? "input_" : "output_");
-			portName += std::to_string(channel.direction == Direction::In ? inputCounter++ : outputCounter++);
-
-			jack_port_t* port = jack_port_register(
-				client, 
-				portName.c_str(), 
-				JACK_DEFAULT_AUDIO_TYPE, 
-				channel.direction == Direction::In ? JackPortIsInput : JackPortIsOutput,
-				0
+			jack_status_t status{};
+			client_ = jack_client_open(
+				cfg.deviceID.empty() ? "mka_audio" : cfg.deviceID.c_str(),
+				JackNoStartServer,
+				&status
 			);
-
-			if(!port) {
-				return Result { Error::DeviceOpenFailed, "Failed to register JACK port." };
+			if (!client_) {
+				return Result{ Error::DeviceOpenFailed, "Failed to open JACK client." };
 			}
 
-			JackChannelHandle &handle = openedChannels[chanCount];
+			jack_on_shutdown(client_, shutdownCallback, this);
+			jack_set_xrun_callback(client_, xrunCallback, this);
+			jack_set_process_callback(client_, processCallback, this);
+			jack_set_sample_rate_callback(client_, sampleRateCallback, this);
+			jack_set_buffer_size_callback(client_, bufferSizeCallback, this);
 
-			std::strncpy(handle.channel.channelInfo.name, channel.name, sizeof(handle.channel.channelInfo.name) - 1);
-			handle.channel.channelInfo.name[sizeof(handle.channel.channelInfo.name) - 1] = '\0';
-			handle.channel.channelInfo.direction = channel.direction;
-			
-			handle.channel.deviceInfo.sampleRate = jack_get_sample_rate(client);
-			handle.channel.deviceInfo.bufferSize = jack_get_buffer_size(client);
-			handle.channel.deviceInfo.format	 = Format::Float32;
-			handle.channel.inputResampler.configure(handle.channel.deviceInfo.sampleRate, sampleRate.load());
-			handle.channel.outputResampler.configure(sampleRate.load(), handle.channel.deviceInfo.sampleRate);
-
-			handle.port = port;
-				
-			const int err = channel.direction == Direction::In
-				? jack_connect(client, channel.name, jack_port_name(port))
-				: jack_connect(client, jack_port_name(port), channel.name);	
-			
-			if (err != 0) {
-				jack_port_unregister(client, port);
-
-				return Result { Error::DeviceOpenFailed, "Failed to connect JACK port." };
+			if (!registerPorts(cfg)) {
+				jack_client_close(client_);
+				client_ = nullptr;
+				return Result{ Error::DeviceOpenFailed, "Failed to register JACK ports." };
 			}
 
-			channelCount.store(chanCount + 1, std::memory_order_release);			
-			
-			if(channel.direction == Direction::In) {
-				inputCount++;
-			}
-			else if(channel.direction == Direction::Out) {
-				outputCount++;
-			}
-			
+			// JACK impose son propre sample rate / buffer size côté serveur ;
+			// open() ne peut que les LIRE après coup, jamais les forcer via cfg.
+			// C'est la négociation documentée dans le contrat de Device::open().
+			info_.id              = cfg.deviceID;
+			info_.name             = "JACK";
+			info_.sampleRate       = jack_get_sample_rate(client_);
+			info_.bufferSize       = jack_get_buffer_size(client_);
+			info_.inputChannels    = static_cast<uint32_t>(inputPorts_.size());
+			info_.outputChannels   = static_cast<uint32_t>(outputPorts_.size());
+			info_.inputLatencyMs   = 0.0;
+			info_.outputLatencyMs  = 0.0;
+			// JACK_DEFAULT_AUDIO_TYPE est toujours du float : cfg.preferredFormat
+			// est ignoré ici, JACK ne négocie pas le format d'échantillon.
+			info_.sampleFormat     = SampleFormat::Float32;
+
+			inputScratch_.assign(inputPorts_.size(), nullptr);
+			outputScratch_.assign(outputPorts_.size(), nullptr);
+
+			state_.store(State::Open, std::memory_order_release);
 			return mka::audio::Ok;
 		}
 
-		void start() override {
-			std::lock_guard<std::mutex> lock(lifecycleMutex);
-			if (!client || state.load() != State::Stopped) return;
+		[[nodiscard]] Result close() override {
+			std::lock_guard lock(controlMutex_);
+			return closeNoLock();
+		}
 
-			state.store(State::Starting);
-
-			if (jack_activate(client) == 0) {
-				state.store(State::Running);
-				return;
+		[[nodiscard]] Result start() override {
+			std::lock_guard lock(controlMutex_);
+			if (state_.load(std::memory_order_acquire) != State::Open) {
+				return Result{ Error::WouldBlock, "Device must be open before starting." };
 			}
-
-			state.store(State::Stopped);
-		}
-
-		void stop() override {
-			std::lock_guard<std::mutex> lock(lifecycleMutex);
-			stopNoLock();
-		}
-		
-		RuntimeStats getRuntimeStats() const override {
-			RuntimeStats stats {};
-			stats.xrunCount = xrunCount.load(std::memory_order_relaxed);
-			stats.underrunCount = underrunCount.load(std::memory_order_relaxed);
-			stats.outputMissingFrames = outputMissingFrames.load(std::memory_order_relaxed);
-			stats.backendSampleRate = jackSampleRate.load(std::memory_order_relaxed);
-			stats.backendBufferSize = jackBufferSize.load(std::memory_order_relaxed);
-			stats.openedChannels = channelCount.load(std::memory_order_relaxed);
-			stats.openedInputs = inputCount.load(std::memory_order_relaxed);
-			stats.openedOutputs = outputCount.load(std::memory_order_relaxed);
-			return stats;
-		}
-
-		Result close() override {
-			std::lock_guard<std::mutex> lock(lifecycleMutex);
-			stopNoLock();
-			
-			xrunCount.store(0);
-			underrunCount.store(0);
-			outputMissingFrames.store(0);
-
-			if (client) {
-				const size_t count = channelCount.load(std::memory_order_acquire);
-	
-				for (size_t i = 0; i < count; ++i) {
-					auto& ch = openedChannels[i];
-					if (!ch.port) continue;
-					jack_port_unregister(client, ch.port);
-					ch.port = nullptr;
-				}
-				
-				channelCount.store(0);
-				inputCount.store(0);
-				outputCount.store(0);
-
-				jack_client_close(client);
-				client = nullptr;
-				state.store(State::Closed);
+			if (jack_activate(client_) != 0) {
+				return Result{ Error::GenericError, "jack_activate failed." };
 			}
+			state_.store(State::Running, std::memory_order_release);
 			return mka::audio::Ok;
 		}
 
-	protected:
-		void run() override {}
-
-	private:
-		
-		void stopNoLock() {
-			if (!client || state.load() != State::Running) return;
-			state.store(State::Stopping);
-			jack_deactivate(client);
-			state.store(State::Stopped);
+		[[nodiscard]] Result stop() override {
+			std::lock_guard lock(controlMutex_);
+			return stopNoLock();
 		}
 
 	private:
-		friend int bufferSizeCallback(jack_nframes_t nframes, void* arg);
-		friend int sampleRateCallback(jack_nframes_t nframes, void* arg);
-		friend int processCallback(jack_nframes_t nframes, void* arg);
-		friend int xrunCallback(void* arg);
-		friend void shutdownCallback(void* arg);
+		friend int processCallback(jack_nframes_t, void*);
+		friend int sampleRateCallback(jack_nframes_t, void*);
+		friend int bufferSizeCallback(jack_nframes_t, void*);
+		friend int xrunCallback(void*);
+		friend void shutdownCallback(void*);
 
-		jack_client_t* client = nullptr;
-		std::unique_ptr<JackChannelHandle[]> openedChannels;
-		std::unique_ptr<float[]> inputBlockStorage;
-		std::unique_ptr<float[]> outputBlockStorage;
-		std::unique_ptr<float[]> inputResampleScratch;
-		std::unique_ptr<float[]> outputResampleScratch;
+		bool registerPorts(const DeviceConfig& cfg) {
+			inputPorts_.reserve(cfg.inputChannels);
+			for (uint32_t i = 0; i < cfg.inputChannels; ++i) {
+				std::string name = "input_" + std::to_string(i);
+				jack_port_t* port = jack_port_register(
+					client_, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+				if (!port) return false;
+				inputPorts_.push_back(port);
+			}
+			outputPorts_.reserve(cfg.outputChannels);
+			for (uint32_t i = 0; i < cfg.outputChannels; ++i) {
+				std::string name = "output_" + std::to_string(i);
+				jack_port_t* port = jack_port_register(
+					client_, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+				if (!port) return false;
+				outputPorts_.push_back(port);
+			}
+			return true;
+		}
 
-		size_t inputCounter = 0;
-		size_t outputCounter = 0;
-		
-		std::atomic<size_t>		channelCount		= 0;
-		std::atomic<size_t>		inputCount			= 0;
-		std::atomic<size_t>		outputCount			= 0;
-		std::atomic<uint32_t>	jackSampleRate		= 0;
-		std::atomic<uint32_t>	jackBufferSize		= 0;
-		std::atomic<size_t>		xrunCount			= 0;
-		std::atomic<size_t>		underrunCount		= 0;
-		std::atomic<size_t>		outputMissingFrames	= 0;
+		Result stopNoLock() {
+			if (state_.load(std::memory_order_acquire) != State::Running) {
+				return mka::audio::Ok; // idempotent
+			}
+			jack_deactivate(client_);
+			state_.store(State::Open, std::memory_order_release);
+			return mka::audio::Ok;
+		}
+
+		Result closeNoLock() {
+			if (state_.load(std::memory_order_acquire) == State::Closed) {
+				return mka::audio::Ok; // idempotent
+			}
+			stopNoLock();
+
+			if (client_) {
+				for (auto* p : inputPorts_)  if (p) jack_port_unregister(client_, p);
+				for (auto* p : outputPorts_) if (p) jack_port_unregister(client_, p);
+				jack_client_close(client_);
+				client_ = nullptr;
+			}
+			inputPorts_.clear();
+			outputPorts_.clear();
+			inputScratch_.clear();
+			outputScratch_.clear();
+
+			state_.store(State::Closed, std::memory_order_release);
+			return mka::audio::Ok;
+		}
+
+		jack_client_t* client_ = nullptr;
+		std::vector<jack_port_t*> inputPorts_;
+		std::vector<jack_port_t*> outputPorts_;
+
+		// Réutilisés à chaque callback : aucune allocation dans le thread audio.
+		std::vector<float*> inputScratch_;
+		std::vector<float*> outputScratch_;
+
+		std::atomic<size_t> xrunCount_{0};
+
+		// Protège open/close/start/stop uniquement. Jamais touché par processCallback.
+		std::mutex controlMutex_;
 	};
+
+	// ---- Callbacks JACK (thread(s) internes à JACK, pas le thread de contrôle) ----
+
+	int processCallback(jack_nframes_t nframes, void* arg) {
+		auto* dev = static_cast<JACK*>(arg);
+		if (!dev->callback_) return 0;
+
+		for (size_t i = 0; i < dev->inputPorts_.size(); ++i) {
+			dev->inputScratch_[i] = static_cast<float*>(
+				jack_port_get_buffer(dev->inputPorts_[i], nframes));
+		}
+		for (size_t i = 0; i < dev->outputPorts_.size(); ++i) {
+			dev->outputScratch_[i] = static_cast<float*>(
+				jack_port_get_buffer(dev->outputPorts_[i], nframes));
+		}
+
+		Buffer buffer{
+			.inputs      = dev->inputScratch_.data(),
+			.outputs     = dev->outputScratch_.data(),
+			.inputCount  = static_cast<uint32_t>(dev->inputPorts_.size()),
+			.outputCount = static_cast<uint32_t>(dev->outputPorts_.size()),
+			.frames      = static_cast<uint32_t>(nframes),
+		};
+
+		dev->callback_(buffer, dev->userData_);
+		return 0;
+	}
 
 	int sampleRateCallback(jack_nframes_t nframes, void* arg) {
-		auto* engine = static_cast<JACK*>(arg);
-		engine->jackSampleRate.store(nframes);
-
-		const size_t channelCount = engine->channelCount.load(std::memory_order_acquire);
-		const uint32_t engineRate = engine->sampleRate.load(std::memory_order_acquire);
-		for (size_t i = 0; i < channelCount; ++i) {
-			auto& channel = engine->openedChannels[i].channel;
-			channel.deviceInfo.sampleRate = nframes;
-			channel.inputResampler.configure(channel.deviceInfo.sampleRate, engineRate);
-			channel.outputResampler.configure(engineRate, channel.deviceInfo.sampleRate);
-		}
-
+		auto* dev = static_cast<JACK*>(arg);
+		// Rare (changement serveur), pas de lock ici pour rester realtime-safe :
+		// on tolère une incohérence transitoire de info_.sampleRate.
+		dev->info_.sampleRate = nframes;
 		return 0;
 	}
 
 	int bufferSizeCallback(jack_nframes_t nframes, void* arg) {
-		auto* engine = static_cast<JACK*>(arg);
-		engine->jackBufferSize.store(nframes);
+		auto* dev = static_cast<JACK*>(arg);
+		dev->info_.bufferSize = nframes;
+		return 0;
+	}
+
+	int xrunCallback(void* arg) {
+		auto* dev = static_cast<JACK*>(arg);
+		dev->xrunCount_.fetch_add(1, std::memory_order_relaxed);
 		return 0;
 	}
 
 	void shutdownCallback(void* arg) {
-		auto* engine = static_cast<JACK*>(arg);
-		engine->state.store(State::Stopped);
+		auto* dev = static_cast<JACK*>(arg);
+		// JACK a déjà libéré le client à ce stade : ne surtout pas rappeler
+		// jack_client_close dessus. On marque juste l'état.
+		dev->client_ = nullptr;
+		dev->state_.store(State::Closed, std::memory_order_release);
 	}
 
-	int xrunCallback(void* arg) {
-		auto* engine = static_cast<JACK*>(arg);
-		engine->xrunCount.fetch_add(1);
-		return 0;
-	}
-
-	int processCallback(jack_nframes_t nframes, void* arg) {
-		auto* engine = static_cast<JACK*>(arg);
-		if (!engine->callback) return 0;	
-		if (nframes > constants::MAX_BLOCK_SIZE) return 0;
-
-		const uint32_t fixedBlockSize = engine->blockSize.load(std::memory_order_acquire);
-		if (fixedBlockSize == 0 || fixedBlockSize > constants::MAX_BLOCK_SIZE) {
-			return 0;
-		}
-
-		size_t i = 0;
-		
-		const uint32_t engineSampleRate = engine->sampleRate.load(std::memory_order_acquire);
-
-		const size_t channelCount	= engine->channelCount.load(std::memory_order_acquire);
-		const size_t inputCount		= engine->inputCount.load(std::memory_order_acquire);
-		const size_t outputCount	= engine->outputCount.load(std::memory_order_acquire);
-	
-		if (inputCount > constants::MAX_CHANNEL_COUNT || outputCount > constants::MAX_CHANNEL_COUNT) {
-			return 0;
-		}
-
-		
-		JackChannelHandle* inputChannels[constants::MAX_CHANNEL_COUNT] {};
-		JackChannelHandle* outputChannels[constants::MAX_CHANNEL_COUNT] {};
-		Channel* inputChannelViews[constants::MAX_CHANNEL_COUNT] {};
-		Channel* outputChannelViews[constants::MAX_CHANNEL_COUNT] {};
-		size_t inIndex = 0;
-		size_t outIndex = 0;
-		
-		for (i = 0; i < channelCount; ++i) {
-	        auto& ch = engine->openedChannels[i];
-			if (ch.channel.channelInfo.direction == Direction::In) {
-				if (inIndex < inputCount) {
-					inputChannels[inIndex] = &ch;
-					inputChannelViews[inIndex++] = &ch.channel;
-				}
-				continue;
-			}
-
-			if (outIndex < outputCount) {
-				outputChannels[outIndex] = &ch;
-				outputChannelViews[outIndex++] = &ch.channel;
-			}
-		}
-
-		if (inIndex != inputCount || outIndex != outputCount) {
-			return 0;
-		}
-
-		for (i = 0; i < inputCount; ++i) {
-			auto* ch = inputChannels[i];
-			if(!ch || !ch->port) continue;
-
-			float* backendBuffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
-			if(!backendBuffer) continue;
-
-			realtime::ingestInput(
-				ch->channel,
-				backendBuffer,
-				nframes,
-				engine->inputResampleScratch.get(),
-				constants::MAX_FIFO_SIZE
-			);
-		}
-
-		const size_t processIt = realtime::computeCallbackIterations(
-			std::span<Channel*>(inputChannelViews, inputCount),
-			std::span<Channel*>(outputChannelViews, outputCount),
-			nframes,
-			fixedBlockSize
-		);
-
-		realtime::runEngine(
-			engine->callback,
-			engineSampleRate,
-			fixedBlockSize,
-			std::span<Channel*>(inputChannelViews, inputCount),
-			std::span<Channel*>(outputChannelViews, outputCount),
-			engine->inputBlockStorage.get(),
-			engine->outputBlockStorage.get(),
-			processIt
-		);
-
-		for (i = 0; i < outputCount; ++i) {
-	        auto* ch = outputChannels[i];
-	        if (!ch || !ch->port) continue;
-
-		    float* buffer = static_cast<float*>(jack_port_get_buffer(ch->port, nframes));
-			if (!buffer) continue;
-
-			const size_t missingFrames = realtime::renderOutput(
-				ch->channel,
-				buffer,
-				nframes,
-				engine->outputResampleScratch.get(),
-				constants::MAX_FIFO_SIZE
-			);
-
-			if (missingFrames > 0) {
-				// Keep telemetry lock-free for realtime safety: one atomic increment for
-				// event count and one for total missing samples.
-				engine->underrunCount.fetch_add(1, std::memory_order_relaxed);
-				engine->outputMissingFrames.fetch_add(missingFrames, std::memory_order_relaxed);
-			}
-		}
-
-		return 0;
-	}
 } // namespace mka::audio
-	

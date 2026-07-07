@@ -1,0 +1,7 @@
+Entering capture thread (ALSA).
+Get period size: 2756  buffer size: 22050
+Recording ...
+Capture completed.
+
+Return value is 0
+alsabat -C default --standalone
