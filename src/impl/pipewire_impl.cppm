@@ -2,6 +2,7 @@ module;
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
 #include <pipewire/keys.h>
+#include <pipewire/link.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
 #include <spa/utils/dict.h>
@@ -28,10 +29,9 @@ namespace mka::audio {
 
 	// Ring buffer mono-canal protégé par mutex : fait transiter les
 	// échantillons capturés (callback capture async) vers le callback
-	// playback qui sert d'horloge principale en duplex. Même compromis
-	// que sur PulseAudio : une latence de synchronisation supplémentaire
-	// (généralement 1-2 périodes) par rapport à un flux réellement
-	// synchrone comme ALSA readi/writei dans la même boucle.
+	// playback qui sert d'horloge principale en duplex. Compromis assumé :
+	// une latence de synchronisation supplémentaire (1-2 périodes) par
+	// rapport à un flux synchrone comme ALSA readi/writei.
 	//
 	// Non copiable/non déplaçable à cause du mutex : stocké derrière
 	// unique_ptr dans un vector pour permettre resize() sans déplacer
@@ -76,25 +76,29 @@ namespace mka::audio {
 		size_t available_ = 0;
 	};
 
-	// deviceID est optionnel : nom de node PipeWire (obtenu via
-	// enumerateDevices()) pour cibler un device précis, ou vide pour laisser
-	// WirePlumber choisir le sink/source par défaut du système.
+	// deviceID est optionnel et n'est PLUS utilisé pour créer le flux
+	// (PW_STREAM_FLAG_AUTOCONNECT désactivé volontairement, voir plus bas) :
+	// il reste disponible côté appelant comme identifiant lisible, mais tout
+	// routage vers un device physique passe exclusivement par routePort(),
+	// appelé explicitement après open().
 	//
-	// IMPORTANT : cette implémentation utilise l'API pw_stream (pas
-	// pw_filter). C'est le chemin que WirePlumber sait router automatiquement
-	// de façon fiable — c'est exactement ce que font pw-play, mpv, ou tout
-	// navigateur. pw_filter crée des noeuds visibles dans le graphe mais QUE
-	// WirePlumber ne relie jamais automatiquement au sink par défaut, quelles
-	// que soient les properties posées dessus.
+	// IMPORTANT : cette implémentation utilise pw_stream (pas pw_filter) —
+	// c'est le chemin que WirePlumber sait router de façon fiable (comme
+	// pw-play, mpv, ou tout navigateur). pw_filter crée des noeuds visibles
+	// mais jamais liés automatiquement, quelles que soient les properties.
 	//
-	// Pour router différentes pistes vers différents COUPLES DE SORTIE d'UNE
-	// MÊME interface (ex: 1/2 vs 3/4), ouvre un seul PipeWire avec
-	// outputChannels = nombre total de canaux physiques, et écris chaque
-	// piste dans le sous-ensemble de buffer.outputs[] qui lui correspond.
-	//
-	// Pour router vers un DEVICE PHYSIQUE DIFFÉRENT (ex: interface principale
-	// + DAC casque séparé), ouvre une DEUXIÈME instance PipeWire avec un
-	// deviceID différent.
+	// Chaque canal (entrée et sortie) reçoit une position AUX0..AUXn-1
+	// explicite à l'ouverture, ce qui force PipeWire à générer des noms de
+	// port déterministes plutôt que de deviner via des heuristiques stéréo
+	// qui ne scalent pas à un grand nombre de canaux. Les noms réels
+	// observés sont préfixés selon la direction :
+	//   - "output_AUXn" pour les ports réels du flux de sortie
+	//   - "input_AUXn"  pour les ports réels du flux d'entrée (à confirmer
+	//     via pw-link -i sur ta version de PipeWire)
+	//   - "monitor_AUXn" est un TAP DE LECTURE SEULE auto-créé sur le flux
+	//     d'entrée, distinct du vrai port d'entrée — ne jamais router
+	//     dessus pour faire arriver un signal physique dans nos canaux.
+	// Utilise auxPortName() plutôt que de construire ces noms à la main.
 	export class PipeWire final : public Device {
 	public:
 		PipeWire() = default;
@@ -105,6 +109,14 @@ namespace mka::audio {
 			std::string description;
 			bool isSink   = false;
 			bool isSource = false;
+		};
+
+		// Décrit un port (le nôtre ou celui d'un node physique cible).
+		struct PortDescriptor {
+			uint32_t id = PW_ID_ANY;
+			std::string name;
+			bool isInput  = false;
+			bool isOutput = false;
 		};
 
 		[[nodiscard]] static std::vector<DeviceDescriptor> enumerateDevices() {
@@ -170,8 +182,7 @@ namespace mka::audio {
 		}
 
 		// Sonde légère : teste uniquement la présence d'un serveur PipeWire
-		// joignable, sans créer de flux ni négocier de format. Utile pour un
-		// fallback vers ALSA sans passer par un open() complet.
+		// joignable, sans créer de flux ni négocier de format.
 		[[nodiscard]] static bool isServerReachable() {
 			ensurePipeWireInitialized();
 			pw_main_loop* loop = pw_main_loop_new(nullptr);
@@ -226,6 +237,93 @@ namespace mka::audio {
 			return lastError_;
 		}
 
+		// Liste les ports (entrée + sortie) d'un node donné, obtenu via
+		// enumerateDevices(). Utilisé pour découvrir les noms de ports réels
+		// d'un device physique avant d'appeler routePort().
+		[[nodiscard]] std::vector<PortDescriptor> enumeratePorts(const std::string& nodeName) {
+			std::lock_guard lock(controlMutex_);
+			if (!core_ || !loop_) return {};
+			pw_thread_loop_lock(loop_);
+			const uint32_t nodeId = findNodeIdByNameNoLock(nodeName);
+			if (nodeId == PW_ID_ANY) {
+				pw_thread_loop_unlock(loop_);
+				return {};
+			}
+			auto ports = enumeratePortsForNodeNoLock(nodeId);
+			pw_thread_loop_unlock(loop_);
+			return ports;
+		}
+
+		// Connecte un port de sortie (source) à un port d'entrée (destination)
+		// dans le graphe PipeWire. Fonctionne dans les deux sens d'usage :
+		//   - "notre" port en source, un port physique en destination (ex:
+		//     router buffer.outputs[3] vers l'entrée gauche d'une interface) ;
+		//   - un port physique en source, "notre" port en destination (ex:
+		//     router un micro vers buffer.inputs[0]).
+		// Pour référencer NOS propres ports, utilise nodeName =
+		// "mka_audio_out" ou "mka_audio_in" (noms fixes posés à l'ouverture),
+		// et portName = auxPortName(Direction, channelIndex) — ne construis
+		// jamais ce nom à la main, le préfixe exact dépend de la direction.
+		[[nodiscard]] Result routePort(const std::string& sourceNodeName, const std::string& sourcePortName,
+										  const std::string& destNodeName, const std::string& destPortName) {
+
+			std::lock_guard lock(controlMutex_);
+			if (state_.load(std::memory_order_acquire) == State::Closed) {
+				return Result{ Error::WouldBlock, "Device must be open before routing ports." };
+			}
+
+			pw_thread_loop_lock(loop_);
+
+			const uint32_t sourceNodeId = findNodeIdByNameNoLock(sourceNodeName);
+			if (sourceNodeId == PW_ID_ANY) {
+				pw_thread_loop_unlock(loop_);
+				return Result{ Error::NotFound, "Source node '" + sourceNodeName + "' not found." };
+			}
+			auto sourcePorts = enumeratePortsForNodeNoLock(sourceNodeId);
+			uint32_t sourcePortId = PW_ID_ANY;
+			for (auto& p : sourcePorts) {
+				if (p.isOutput && p.name == sourcePortName) { sourcePortId = p.id; break; }
+			}
+			if (sourcePortId == PW_ID_ANY) {
+				pw_thread_loop_unlock(loop_);
+				return Result{ Error::NotFound,
+					"Source port '" + sourcePortName + "' not found on node '" + sourceNodeName + "'." };
+			}
+
+			const uint32_t destNodeId = findNodeIdByNameNoLock(destNodeName);
+			if (destNodeId == PW_ID_ANY) {
+				pw_thread_loop_unlock(loop_);
+				return Result{ Error::NotFound, "Destination node '" + destNodeName + "' not found." };
+			}
+			auto destPorts = enumeratePortsForNodeNoLock(destNodeId);
+			uint32_t destPortId = PW_ID_ANY;
+			for (auto& p : destPorts) {
+				if (p.isInput && p.name == destPortName) { destPortId = p.id; break; }
+			}
+			if (destPortId == PW_ID_ANY) {
+				pw_thread_loop_unlock(loop_);
+				return Result{ Error::NotFound,
+					"Destination port '" + destPortName + "' not found on node '" + destNodeName + "'." };
+			}
+
+			auto r = createLinkNoLock(sourceNodeId, sourcePortId, destNodeId, destPortId);
+			pw_thread_loop_unlock(loop_);
+			return r;
+		}
+
+		enum class Direction { Input, Output };
+
+		// Construit le nom réel du port pour un de NOS canaux, selon la
+		// direction. "input_" pour les vrais ports d'entrée (où l'audio
+		// physique arrive), "output_" pour les ports de sortie. Ne jamais
+		// utiliser "monitor_AUXn" comme cible de routage entrant : c'est un
+		// tap de lecture seule auto-créé par PipeWire, distinct du vrai
+		// port d'entrée.
+		[[nodiscard]] static std::string auxPortName(Direction direction, uint32_t channelIndex) {
+			const char* prefix = (direction == Direction::Input) ? "input_" : "output_";
+			return std::string(prefix) + "AUX" + std::to_string(channelIndex);
+		}
+
 	private:
 		void setLastError(Result r) {
 			std::lock_guard lock(lastErrorMutex_);
@@ -234,6 +332,126 @@ namespace mka::audio {
 		void clearLastError() {
 			std::lock_guard lock(lastErrorMutex_);
 			lastError_ = mka::audio::Ok;
+		}
+
+		// Crée un objet Link entre deux ports identifiés par leurs ids.
+		// Doit être appelé avec loop_ déjà verrouillé.
+		[[nodiscard]] Result createLinkNoLock(uint32_t outputNodeId, uint32_t outputPortId,
+		                                        uint32_t inputNodeId, uint32_t inputPortId) {
+			pw_properties* linkProps = pw_properties_new(
+				PW_KEY_LINK_OUTPUT_NODE, std::to_string(outputNodeId).c_str(),
+				PW_KEY_LINK_OUTPUT_PORT, std::to_string(outputPortId).c_str(),
+				PW_KEY_LINK_INPUT_NODE,  std::to_string(inputNodeId).c_str(),
+				PW_KEY_LINK_INPUT_PORT,  std::to_string(inputPortId).c_str(),
+				nullptr
+			);
+
+			pw_proxy* linkProxy = static_cast<pw_proxy*>(pw_core_create_object(
+				core_, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, &linkProps->dict, 0
+			));
+			pw_properties_free(linkProps);
+
+			if (!linkProxy) {
+				return Result{ Error::GenericError, "pw_core_create_object (link-factory) failed." };
+			}
+			activeLinks_.push_back(linkProxy);
+			return mka::audio::Ok;
+		}
+
+		// Énumère tous les ports appartenant à un node donné. Doit être
+		// appelé avec loop_ déjà verrouillé (thread de contrôle).
+		[[nodiscard]] std::vector<PortDescriptor> enumeratePortsForNodeNoLock(uint32_t nodeId) {
+			std::vector<PortDescriptor> result;
+			pw_registry* registry = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
+
+			struct QueryState {
+				uint32_t targetNodeId;
+				std::vector<PortDescriptor>* out;
+				pw_thread_loop* loop;
+				bool done = false;
+			} state{ nodeId, &result, loop_ };
+
+			spa_hook listener{};
+			pw_registry_events events{};
+			events.version = PW_VERSION_REGISTRY_EVENTS;
+			events.global = [](void* data, uint32_t id, uint32_t, const char* type,
+								 uint32_t, const spa_dict* props) {
+				if (!props || std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0) return;
+				auto* st = static_cast<QueryState*>(data);
+				const char* nodeIdStr = spa_dict_lookup(props, PW_KEY_NODE_ID);
+				if (!nodeIdStr || static_cast<uint32_t>(std::stoul(nodeIdStr)) != st->targetNodeId) return;
+				const char* portName      = spa_dict_lookup(props, PW_KEY_PORT_NAME);
+				const char* portDirection = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+				PortDescriptor desc;
+				desc.id       = id;
+				desc.name     = portName ? portName : "";
+				desc.isInput  = portDirection && std::strcmp(portDirection, "in")  == 0;
+				desc.isOutput = portDirection && std::strcmp(portDirection, "out") == 0;
+				st->out->push_back(desc);
+			};
+			pw_registry_add_listener(registry, &listener, &events, &state);
+
+			spa_hook coreListener{};
+			pw_core_events coreEvents{};
+			coreEvents.version = PW_VERSION_CORE_EVENTS;
+			coreEvents.done = [](void* data, uint32_t, int) {
+				auto* st = static_cast<QueryState*>(data);
+				st->done = true;
+				pw_thread_loop_signal(st->loop, false);
+			};
+			pw_core_add_listener(core_, &coreListener, &coreEvents, &state);
+			pw_core_sync(core_, PW_ID_CORE, 0);
+
+			while (!state.done) pw_thread_loop_wait(loop_);
+
+			spa_hook_remove(&listener);
+			spa_hook_remove(&coreListener);
+			pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
+			return result;
+		}
+
+		// Retourne PW_ID_ANY si non trouvé. Doit être appelé avec loop_
+		// déjà verrouillé.
+		[[nodiscard]] uint32_t findNodeIdByNameNoLock(const std::string& nodeName) {
+			uint32_t foundId = PW_ID_ANY;
+			pw_registry* registry = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
+
+			struct QueryState {
+				const std::string* targetName;
+				uint32_t* outId;
+				pw_thread_loop* loop;
+				bool done = false;
+			} state{ &nodeName, &foundId, loop_ };
+
+			spa_hook listener{};
+			pw_registry_events events{};
+			events.version = PW_VERSION_REGISTRY_EVENTS;
+			events.global = [](void* data, uint32_t id, uint32_t, const char* type,
+								 uint32_t, const spa_dict* props) {
+				if (!props || std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
+				auto* st = static_cast<QueryState*>(data);
+				const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+				if (name && *st->targetName == name) *st->outId = id;
+			};
+			pw_registry_add_listener(registry, &listener, &events, &state);
+
+			spa_hook coreListener{};
+			pw_core_events coreEvents{};
+			coreEvents.version = PW_VERSION_CORE_EVENTS;
+			coreEvents.done = [](void* data, uint32_t, int) {
+				auto* st = static_cast<QueryState*>(data);
+				st->done = true;
+				pw_thread_loop_signal(st->loop, false);
+			};
+			pw_core_add_listener(core_, &coreListener, &coreEvents, &state);
+			pw_core_sync(core_, PW_ID_CORE, 0);
+
+			while (!state.done) pw_thread_loop_wait(loop_);
+
+			spa_hook_remove(&listener);
+			spa_hook_remove(&coreListener);
+			pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
+			return foundId;
 		}
 
 		[[nodiscard]] Result openNoLock(const DeviceConfig& cfg) {
@@ -257,6 +475,19 @@ namespace mka::audio {
 				return Result{ Error::DeviceOpenFailed, "pw_thread_loop_new failed." };
 			}
 			pw_thread_loop_lock(loop_);
+
+			context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
+			if (!context_) {
+				pw_thread_loop_unlock(loop_);
+				closeNoLock();
+				return Result{ Error::DeviceOpenFailed, "pw_context_new failed." };
+			}
+			core_ = pw_context_connect(context_, nullptr, 0);
+			if (!core_) {
+				pw_thread_loop_unlock(loop_);
+				closeNoLock();
+				return Result{ Error::DeviceOpenFailed, "pw_context_connect failed (serveur PipeWire injoignable ?)." };
+			}
 
 			readyPlayback_.store(cfg.outputChannels == 0, std::memory_order_release);
 			readyCapture_.store(cfg.inputChannels == 0, std::memory_order_release);
@@ -303,7 +534,7 @@ namespace mka::audio {
 			}
 
 			info_.id              = cfg.deviceID;
-			info_.name             = "mkaudio"; //cfg.deviceID.empty() ? "PipeWire (default)" : cfg.deviceID;
+			info_.name             = "mkaudio";
 			info_.sampleRate       = cfg.sampleRate;
 			info_.bufferSize       = cfg.bufferSize;
 			info_.inputChannels    = cfg.inputChannels;
@@ -325,9 +556,6 @@ namespace mka::audio {
 
 				captureRings_.clear();
 				if (cfg.inputChannels > 0 && cfg.outputChannels > 0) {
-					// unique_ptr par ring : ChannelRing contient un mutex non
-					// copiable/déplaçable, donc le vector ne peut stocker que
-					// des pointeurs, jamais les objets par valeur.
 					captureRings_.reserve(cfg.inputChannels);
 					for (uint32_t c = 0; c < cfg.inputChannels; ++c) {
 						auto ring = std::make_unique<ChannelRing>();
@@ -352,9 +580,6 @@ namespace mka::audio {
 		[[nodiscard]] Result createStream(pw_stream*& stream, spa_direction dir,
 		                                    const DeviceConfig& cfg, uint32_t channels,
 		                                    const char* streamName) {
-			// media.class = "Stream/Output/Audio" ou "Stream/Input/Audio" est
-			// LA propriété que WirePlumber utilise pour identifier un flux
-			// à auto-router.
 			pw_properties* props = pw_properties_new(
 				PW_KEY_MEDIA_TYPE, "Audio",
 				PW_KEY_MEDIA_CATEGORY, dir == PW_DIRECTION_OUTPUT ? "Playback" : "Capture",
@@ -363,9 +588,9 @@ namespace mka::audio {
 				PW_KEY_NODE_NAME, streamName,
 				nullptr
 			);
-			if (!cfg.deviceID.empty()) {
-				pw_properties_set(props, PW_KEY_TARGET_OBJECT, cfg.deviceID.c_str());
-			}
+			// PW_KEY_TARGET_OBJECT volontairement absent : sans
+			// PW_STREAM_FLAG_AUTOCONNECT, cette propriété n'a plus d'effet.
+			// Tout routage passe exclusivement par routePort() après open().
 
 			static const pw_stream_events playbackEvents = makeStreamEvents(true);
 			static const pw_stream_events captureEvents  = makeStreamEvents(false);
@@ -388,11 +613,18 @@ namespace mka::audio {
 			audioInfo.channels = channels;
 			audioInfo.rate     = cfg.sampleRate;
 
+			for (uint32_t i = 0; i < channels && i < SPA_AUDIO_MAX_CHANNELS; ++i) {
+				audioInfo.position[i] = static_cast<uint32_t>(SPA_AUDIO_CHANNEL_AUX0) + i;
+			}
+
 			const spa_pod* params[1];
 			params[0] = spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &audioInfo);
 
+			// AUTOCONNECT désactivé volontairement : le flux est créé actif
+			// mais totalement isolé du graphe tant que routePort() n'a pas
+			// été appelé explicitement. Routage 100% manuel, comme demandé.
 			const auto flags = static_cast<pw_stream_flags>(
-				PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS
+				PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS
 			);
 			if (pw_stream_connect(stream, dir, PW_ID_ANY, flags, params, 1) < 0) {
 				pw_stream_destroy(stream);
@@ -406,9 +638,6 @@ namespace mka::audio {
 			if (state_.load(std::memory_order_acquire) != State::Open) {
 				return Result{ Error::WouldBlock, "Device must be open before starting." };
 			}
-			// pw_stream commence à produire/consommer dès connect() ; comme
-			// sur PulseAudio, start()/stop() basculent un état logique pour
-			// respecter le contrat de cycle de vie de l'interface Device.
 			clearLastError();
 			state_.store(State::Running, std::memory_order_release);
 			return mka::audio::Ok;
@@ -422,21 +651,32 @@ namespace mka::audio {
 			return mka::audio::Ok;
 		}
 
+		// Fix : gate sur la présence de ressources (loop_), pas sur l'état
+		// logique — auparavant, un appel depuis un chemin d'échec de
+		// openNoLock() (où state_ vaut encore Closed) retournait
+		// immédiatement sans jamais nettoyer loop_/context_/core_/streams
+		// déjà alloués, causant une fuite de ressources PipeWire à chaque
+		// échec partiel d'ouverture.
 		Result closeNoLock() {
-			if (state_.load(std::memory_order_acquire) == State::Closed) {
+			if (!loop_) {
+				state_.store(State::Closed, std::memory_order_release);
 				return mka::audio::Ok;
 			}
 			stopNoLock();
 
-			if (loop_) {
-				pw_thread_loop_lock(loop_);
-				if (playbackStream_) { pw_stream_destroy(playbackStream_); playbackStream_ = nullptr; }
-				if (captureStream_)  { pw_stream_destroy(captureStream_);  captureStream_  = nullptr; }
-				pw_thread_loop_unlock(loop_);
-				pw_thread_loop_stop(loop_);
-				pw_thread_loop_destroy(loop_);
-				loop_ = nullptr;
+			pw_thread_loop_lock(loop_);
+			for (auto* link : activeLinks_) {
+				pw_proxy_destroy(link);
 			}
+			activeLinks_.clear();
+			if (playbackStream_) { pw_stream_destroy(playbackStream_); playbackStream_ = nullptr; }
+			if (captureStream_)  { pw_stream_destroy(captureStream_);  captureStream_  = nullptr; }
+			if (core_)    { pw_core_disconnect(core_); core_ = nullptr; }
+			if (context_) { pw_context_destroy(context_); context_ = nullptr; }
+			pw_thread_loop_unlock(loop_);
+			pw_thread_loop_stop(loop_);
+			pw_thread_loop_destroy(loop_);
+			loop_ = nullptr;
 
 			captureRings_.clear();
 			inputChannelBuffers_.clear();
@@ -510,8 +750,6 @@ namespace mka::audio {
 			const uint32_t frames = stride > 0 ? buf->datas[0].chunk->size / stride : 0;
 
 			if (self->configured_.outputChannels > 0) {
-				// Duplex : pousse dans les ring buffers, consommés par le
-				// callback playback qui sert d'horloge principale.
 				static thread_local std::vector<float> deinterleave;
 				deinterleave.resize(frames);
 				for (uint32_t c = 0; c < inCh; ++c) {
@@ -519,7 +757,6 @@ namespace mka::audio {
 					self->captureRings_[c]->push(deinterleave.data(), frames);
 				}
 			} else {
-				// Capture seule : appelle directement le callback utilisateur.
 				static thread_local std::vector<float> deinterleave;
 				deinterleave.resize(static_cast<size_t>(inCh) * frames);
 				for (uint32_t c = 0; c < inCh; ++c) {
@@ -594,24 +831,24 @@ namespace mka::audio {
 			pw_stream_queue_buffer(self->playbackStream_, b);
 		}
 
-		pw_thread_loop* loop_           = nullptr;
-		pw_stream* playbackStream_      = nullptr;
-		pw_stream* captureStream_       = nullptr;
+		pw_thread_loop* loop_      = nullptr;
+		pw_context* context_       = nullptr;
+		pw_core* core_             = nullptr;
+		pw_stream* playbackStream_ = nullptr;
+		pw_stream* captureStream_  = nullptr;
 
 		std::atomic<bool> readyPlayback_{false};
 		std::atomic<bool> readyCapture_{false};
 		std::atomic<bool> streamError_{false};
 		std::string negotiationError_;
 
-		// vector<unique_ptr<ChannelRing>> : ChannelRing contient un mutex
-		// non copiable/déplaçable, donc impossible de le stocker par valeur
-		// dans un vector redimensionnable. Chaque ring est alloué
-		// individuellement et référencé par pointeur stable.
 		std::vector<std::unique_ptr<ChannelRing>> captureRings_;
 		std::vector<float*> inputChannelBuffers_;
 		std::vector<float*> outputChannelBuffers_;
 		std::vector<float> inputPlanarScratch_;
 		std::vector<float> outputPlanarScratch_;
+
+		std::vector<pw_proxy*> activeLinks_;
 
 		std::atomic<size_t> xrunCount_{0};
 

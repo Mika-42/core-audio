@@ -6,6 +6,8 @@
 import audio.abstract_core;
 import audio.pipewire;
 
+using namespace mka::audio; 
+
 #define CHECK(x)								\
 do {											\
 	auto ret = x;								\
@@ -51,31 +53,16 @@ void print_devices(const auto &devices) {
 }
 
 int main() {
-	mka::audio::PipeWire engine;
+	
+	PipeWire engine;
 
 	const auto devices = engine.enumerateDevices();
 	print_devices(devices);
 
-	// [2] setup the engine
-	engine.setCallback(audio_callback);
+	int choice = -1;
+	std::print(">> choisis le device cible: ");
+	std::cin >> choice;
 
-	// [3] open the desire channel
-	// output 0 : master L
-	// output 1 : master R
-	// output 2 : headphone L
-	// output 3 : headphone R
-	// output 4
-	// output 5
-	// output 6
-	// output 7
-	// output 8
-	// output 9
-	// output 10
-	// output 11
-	// output 12
-	// output 13
-	// output 14
-	// output 15
 	mka::audio::DeviceConfig cfg {
 		.sampleRate = 44100,
 		.inputChannels = 16,
@@ -83,9 +70,39 @@ int main() {
 	};
 
 	CHECK(engine.open(cfg));
+	
+	auto outPorts = engine.enumeratePorts(devices[choice].nodeName);
+	std::println("Ports du device de sortie '{}':", devices[choice].description);
+	
+	for (auto& p : outPorts) {
+		if (p.isInput) std::println("  {} ({})", p.name, p.isInput ? "out" : "in");
+	}
 
-	print_info(engine.info());
+	int choice2 = -1;
+	if(outPorts.size() != 0) {
+		std::print(">> choisis le port cible: ");
+		std::cin >> choice2;
+	}
 
+	if (choice2 >= 0 && choice2 < static_cast<int>(outPorts.size())) {
+		CHECK(engine.routePort(
+			"mka_audio_out",
+			PipeWire::auxPortName(PipeWire::Direction::Output, 4),
+			devices[choice].nodeName,
+			outPorts[choice2].name
+		));
+		CHECK(engine.routePort(
+			"mka_audio_out",
+			PipeWire::auxPortName(PipeWire::Direction::Output, 4),
+			devices[choice].nodeName,
+			outPorts[choice2+1].name
+		));
+	}
+
+
+	// [2] setup the engine
+	engine.setCallback(audio_callback);
+	
 	// [4] start the engine
 	CHECK(engine.start());
 
