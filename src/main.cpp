@@ -91,12 +91,6 @@ int main() {
 			devices[choice].nodeName,
 			outPorts[choice2].name
 		));
-		CHECK(engine.routePort(
-			"mka_audio_out",
-			PipeWire::auxPortName(PipeWire::Direction::Output, 4),
-			devices[choice].nodeName,
-			outPorts[choice2+1].name
-		));
 	}
 
 

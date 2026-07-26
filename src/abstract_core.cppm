@@ -5,7 +5,6 @@ module;
 export module audio.abstract_core;
 import audio.error;
 import audio.config;
-import audio.constants;
 
 export namespace mka::audio {
 
