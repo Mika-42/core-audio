@@ -101,7 +101,10 @@ namespace mka::audio {
 	export class PipeWire final : public Device {
 	public:
 		PipeWire() = default;
-		~PipeWire() override { closeNoLock(); }
+		~PipeWire() override { 
+			closeNoLock(); 
+			shutdown();
+		}
 
 		struct DeviceDescriptor {
 			std::string nodeName;
@@ -321,6 +324,10 @@ namespace mka::audio {
 		[[nodiscard]] static std::string auxPortName(Direction direction, uint32_t channelIndex) {
 			const char* prefix = (direction == Direction::Input) ? "input_" : "output_";
 			return std::string(prefix) + "AUX" + std::to_string(channelIndex);
+		}
+
+		static void shutdown() {
+				pw_deinit();
 		}
 
 	private:
