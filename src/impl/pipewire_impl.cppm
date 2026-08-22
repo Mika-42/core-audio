@@ -17,7 +17,6 @@ module;
 export module audio.pipewire;
 import audio.abstract_core;
 import audio.error;
-import audio.config;
 
 namespace mka::audio {
 

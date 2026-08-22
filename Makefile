@@ -37,10 +37,12 @@ EXAMPLE_BUILD_DIR := $(BUILD_DIR)/examples
 
 MODULE_SRCS := \
 	$(SRC_DIR)/utils/error.cppm \
-	$(SRC_DIR)/utils/config.cppm \
-    $(SRC_DIR)/abstract_core.cppm \
-    $(SRC_DIR)/impl/pipewire_impl.cppm \
-	$(SRC_DIR)/impl/alsa_impl.cppm
+	$(SRC_DIR)/utils/block.cppm \
+	$(SRC_DIR)/utils/routing_table.cppm \
+	$(SRC_DIR)/utils/audio_engine.cppm \
+    $(SRC_DIR)/abstract_backend.cppm 
+#    $(SRC_DIR)/impl/pipewire_impl.cppm \
+#	$(SRC_DIR)/impl/alsa_impl.cppm
 
 MODULE_OBJS := $(patsubst $(SRC_DIR)/%.cppm,$(OBJ_DIR)/%.o,$(MODULE_SRCS))
 

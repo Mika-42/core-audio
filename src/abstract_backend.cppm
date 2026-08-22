@@ -4,7 +4,6 @@ module;
 #include <atomic>
 export module audio.abstract_core;
 import audio.error;
-import audio.config;
 
 export namespace mka::audio {
 
@@ -70,6 +69,8 @@ export namespace mka::audio {
 		[[nodiscard]] virtual Result close() = 0;
 		[[nodiscard]] virtual Result start() = 0;
 		[[nodiscard]] virtual Result stop() = 0;
+
+		//[[nodiscard]] virtual Result routePort(Port io, const std::string& destPortName) = 0;
 
 		[[nodiscard]] virtual Result reopen(const DeviceConfig& cfg) {
 			if (state_.load(std::memory_order_acquire) == State::Running) {

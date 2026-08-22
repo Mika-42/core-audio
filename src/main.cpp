@@ -3,11 +3,13 @@
 #include <limits>
 #include <cmath>
 
-import audio.abstract_core;
-import audio.pipewire;
-
-using namespace mka::audio; 
-
+//import audio.abstract_core;
+//import audio.pipewire;
+import audio.engine;
+import audio.block;
+import audio.routing_table;
+//using namespace mka::audio; 
+/*
 #define CHECK(x)								\
 do {											\
 	auto ret = x;								\
@@ -51,9 +53,46 @@ void print_devices(const auto &devices) {
 		std::println("nodeName : {}, description : {}, sink : {}, source : {}", d.nodeName, d.description, d.isSink, d.isSource);
 	}
 }
+*/
+
+namespace mka::audio {
+	void processNextBlock(const BlockView& input, BlockView& output) {
+		for(size_t i=0; i<output.frames(); ++i) {
+			output.channel(0)[i] = std::cos(i);
+		}
+	}
+}
 
 int main() {
-	
+/*	mka::audio::BackendBuffer input_buffer {
+		.data = nullptr,
+		.channels = 0,
+		.frames = 512
+	};
+
+float output_buffer_data[64][4096] = {};
+float* output_channels[64];
+
+for (size_t ch = 0; ch < 64; ++ch) {
+    output_channels[ch] = output_buffer_data[ch];
+}
+*/
+	//mka::audio::BackendBuffer output_buffer {
+	//	.data = output_channels,
+	//	.channels = 64,
+	//	.frames = 4096
+	//};
+
+	//mka::audio::RoutingTable routing(64);
+
+//	routing.output(0).link(0);
+
+	//mka::audio::Block workIn_ {};
+	//mka::audio::Block workOut_ {};
+	//workIn_.configure(64, 512);
+	//workOut_.configure(64, 512);
+	//mka::audio::audio_process(input_buffer, output_buffer, routing,workIn_, workOut_, mka::audio::processNextBlock);
+	/*	
 	PipeWire engine;
 
 	const auto devices = engine.enumerateDevices();
@@ -109,7 +148,7 @@ int main() {
 	
 	// [6] close the engine
 	CHECK(engine.close());
-
+*/
 	return 0;
 }
 
