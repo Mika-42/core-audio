@@ -18,7 +18,6 @@ module;
 export module audio.alsa;
 import audio.abstract_core;
 import audio.error;
-import audio.config;
 
 namespace mka::audio {
 
