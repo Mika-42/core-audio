@@ -185,19 +185,6 @@ namespace mka::audio {
 			return stopNoLock();
 		}
 
-		// Atomique bout-en-bout : un seul verrou tenu sur toute la séquence
-		// stop -> close -> open, aucune fenêtre où un autre thread de contrôle
-		// pourrait s'insérer entre deux étapes.
-		[[nodiscard]] Result reopen(const DeviceConfig& cfg) override {
-			std::lock_guard lock(controlMutex_);
-			if (state_.load(std::memory_order_acquire) == State::Running) {
-				if (auto r = stopNoLock(); !r) return r;
-			}
-			if (state_.load(std::memory_order_acquire) != State::Closed) {
-				if (auto r = closeNoLock(); !r) return r;
-			}
-			return openNoLock(cfg);
-		}
 
 		// Télémétrie temps réel safe : détail input/output plutôt qu'un
 		// compteur agrégé qui masquerait l'origine du glitch.
