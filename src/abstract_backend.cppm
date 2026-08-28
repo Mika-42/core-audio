@@ -3,6 +3,7 @@ module;
 #include <string>
 #include <vector>
 export module audio.abstract_core;
+export import audio.engine;
 
 /**
  * Backend backend;
@@ -73,13 +74,19 @@ export namespace mka::audio {
 			virtual std::vector<DeviceID> getDevices() = 0;
 
 			virtual Capabilities getCapabilities(const DeviceID& id) = 0;
-		
+	
+			virtual void setCallback(ProcessBlockFn processBlock) final {
+				processBlock_ = processBlock;	
+			}
+				
 			// open device with a configuration, in case of fail, do not negotiate. only fail
 			virtual bool open(const DeviceConfig& cfg) = 0;
 			virtual bool close() = 0;
 			
 			virtual bool start() = 0;
 			virtual bool stop() = 0;
+		protected:
+			ProcessBlockFn processBlock_ = nullptr;
 	};
 }
 /*	//-----
