@@ -22,7 +22,7 @@ void <callback_name>(const BlockView& input, BlockView& output) {
 }
 
 int main() {
-    Backend backend;
+    Backend backend(<callback_name>);
  
     auto list = backend.getDevices();
   
@@ -75,23 +75,16 @@ your code must following this pipeline :
 ```mermaid
 graph LR
 	A(("Begin"))
-
-	subgraph "Setup engine"
-		B1(["set callback"])
-		B2(["set sampleRate"])
-		B3(["set blockSize"])
-	end
-
 	C(["open"])
 	D(["start"])
 	E(["stop"])
 	F(["close"])
 	G(("End"))
 
-	B3 --> C --> D --> E --> F --> G
-	A --> B1 --> B2 --> B3
+	A --> C --> D --> E --> F --> G
+	
 	classDef step fill:#775500
-  	class B1,B2,B3,C,D,E,F step;
+  	class C,D,E,F step;
 	style A fill:#007700
 	style G fill:#770000
 ```
