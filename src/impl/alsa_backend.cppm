@@ -28,7 +28,7 @@ export namespace mka::audio {
 
 	enum class State : uint8_t { Closed, Open, Running };
 	*/
-	class ALSA {
+	class ALSA : public Backend {
 		public:
 
 			virtual std::vector<DeviceID> getDevices() {
