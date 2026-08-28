@@ -186,12 +186,12 @@ namespace mka::audio {
 		}
 
 		void process(BackendBuffer& input, BackendBuffer& output, ProcessBlockFn processBlock) {
-			audio_process(input, output, routing_, workIn_, workOut_, processBlock);
+			audio_process(input, output, routing, workIn_, workOut_, processBlock);
 		}
 
 
+		RoutingTable routing;
 		private:
-			RoutingTable routing_;
 			Block workIn_ {};
 			Block workOut_ {};
 

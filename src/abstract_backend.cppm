@@ -1,24 +1,89 @@
 module;
-#include <cstdint>
+#include <cstddef>
 #include <string>
-#include <atomic>
+#include <vector>
 export module audio.abstract_core;
-import audio.error;
 
+/**
+ * Backend backend;
+ *
+ * auto list = backend.getDevices();
+ * 
+ * auto deviceSelected = list[n];
+ *
+ * auto capability = backend.getCapabilities(deviceSelected);
+ *
+ * DeviceConfig config = {
+ *   deviceSelected
+ *   capability.samplerate[0],
+ *   ...
+ * };
+ *
+ * if(backend.open(config).failed()) {
+ *		std::println("[param] : x unsupported with [param] y");
+ *		std::println("supported values : [a, b, ..., c]");
+ *		return;
+ * }
+ *
+ * backend.start();
+ *
+ * while(isAlive) {
+ *	...
+ * }
+ *
+ * backend.stop();
+ * backend.close();
+ * */
 export namespace mka::audio {
 
-	enum class State : uint8_t { Closed, Open, Running };
+	using DeviceID = std::string;
 
 	enum class SampleFormat { Int16, Int24, Int32, Float32, Float64 };
 
-	struct DeviceConfig {
-		std::string deviceID;
-		uint32_t sampleRate       = 44100;
-		uint32_t bufferSize       = 256;
-		uint32_t inputChannels    = 2;
-		uint32_t outputChannels   = 2;
-		SampleFormat preferredFormat = SampleFormat::Float32;
+	// What device can do
+	struct Capabilities {
+		std::vector<size_t> sampleRates;
+		std::vector<size_t> bufferSizes;
+		std::vector<SampleFormat> sampleFormats;
+		size_t inputChannels;
+		size_t outputChannels;
 	};
+
+	// What I want
+	struct DeviceConfig {
+		DeviceID deviceID;
+		size_t sampleRate;
+		size_t bufferSize;
+		size_t inputChannels;
+		size_t outputChannels;
+		SampleFormat sampleFormat;
+	};
+
+	enum class State : uint8_t { Closed, Open, Running };
+	
+	class Backend {
+		public:
+			Backend(const Backend&) = delete;
+			Backend& operator=(const Backend&) = delete;
+			Backend(Backend&&) = delete;
+			Backend& operator=(Backend&&) = delete;
+
+			virtual ~Backend() = default;
+
+			virtual std::vector<DeviceID> getDevices() = 0;
+
+			virtual Capabilities getCapabilities(const DeviceID& id) = 0;
+		
+			// open device with a configuration, in case of fail, do not negotiate. only fail
+			virtual bool open(const DeviceConfig& cfg) = 0;
+			virtual bool close() = 0;
+			
+			virtual bool start() = 0;
+			virtual bool stop() = 0;
+	};
+}
+/*	//-----
+	enum class State : uint8_t { Closed, Open, Running };
 
 	struct DeviceInfo {
 		std::string id;
@@ -70,18 +135,6 @@ export namespace mka::audio {
 		[[nodiscard]] virtual Result start() = 0;
 		[[nodiscard]] virtual Result stop() = 0;
 
-		//[[nodiscard]] virtual Result routePort(Port io, const std::string& destPortName) = 0;
-
-		[[nodiscard]] virtual Result reopen(const DeviceConfig& cfg) {
-			if (state_.load(std::memory_order_acquire) == State::Running) {
-				if (auto r = stop(); !r) return r;
-			}
-			if (state_.load(std::memory_order_acquire) != State::Closed) {
-				if (auto r = close(); !r) return r;
-			}
-			return open(cfg);
-		}
-
 		void setCallback(Callback callback, void* userData = nullptr) {
 			callback_ = callback;
 			userData_ = userData;
@@ -106,4 +159,4 @@ export namespace mka::audio {
 		std::atomic<State> state_{State::Closed};
 		DeviceInfo          info_ = {};
 	};
-}
+}*/
