@@ -37,33 +37,36 @@ export import audio.engine;
  * */
 export namespace mka::audio {
 
-	using DeviceID = std::string;
-
-	enum class SampleFormat { Int16, Int24, Int32, Float32, Float64 };
-
-	// What device can do
-	struct Capabilities {
+	enum class SampleFormat { Int16, Int24, Int32, Float32, Float64, Invalid };
+		
+	// What I have
+	struct DeviceDescriptor {
+		std::string id;
+		std::string name;
+		// capabilities
 		std::vector<size_t> sampleRates;
 		std::vector<size_t> bufferSizes;
 		std::vector<SampleFormat> sampleFormats;
-		size_t inputChannels;
-		size_t outputChannels;
+		size_t inputChannels = 0;
+		size_t outputChannels = 0;
 	};
-
+	
 	// What I want
 	struct DeviceConfig {
-		DeviceID deviceID;
-		size_t sampleRate;
-		size_t bufferSize;
-		size_t inputChannels;
-		size_t outputChannels;
+		std::string id;
+
+		size_t sampleRate = 0;
+		size_t bufferSize = 0;
 		SampleFormat sampleFormat;
+		size_t inputChannels = 0;
+		size_t outputChannels = 0;
 	};
 
-	enum class State : uint8_t { Closed, Open, Running };
+	enum class State { Closed, Open, Running };
 	
 	class Backend {
 		public:
+			Backend() = default;
 			Backend(const Backend&) = delete;
 			Backend& operator=(const Backend&) = delete;
 			Backend(Backend&&) = delete;
@@ -71,9 +74,7 @@ export namespace mka::audio {
 
 			virtual ~Backend() = default;
 
-			virtual std::vector<DeviceID> getDevices() = 0;
-
-			virtual Capabilities getCapabilities(const DeviceID& id) = 0;
+			virtual std::vector<DeviceDescriptor> getDevices() = 0;
 	
 			virtual void setCallback(ProcessBlockFn processBlock) final {
 				processBlock_ = processBlock;	
@@ -85,85 +86,12 @@ export namespace mka::audio {
 			
 			virtual bool start() = 0;
 			virtual bool stop() = 0;
+			
+			static constexpr size_t SUPPORTED_SAMPLE_RATES[] = {8000,11025,16000,22050,32000,44100,48000,88200,96000, 176400,192000,352800,384000 };
+			static constexpr size_t SUPPORTED_BUFFER_SIZES[] = { 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192};
+		
 		protected:
 			ProcessBlockFn processBlock_ = nullptr;
+
 	};
 }
-/*	//-----
-	enum class State : uint8_t { Closed, Open, Running };
-
-	struct DeviceInfo {
-		std::string id;
-		std::string name;
-		uint32_t sampleRate     = 0;
-		uint32_t bufferSize     = 0;
-		uint32_t inputChannels  = 0;
-		uint32_t outputChannels = 0;
-		double inputLatencyMs   = 0.0;
-		double outputLatencyMs  = 0.0;
-		SampleFormat sampleFormat = SampleFormat::Float32;
-	};
-
-	// Contrat : pointeurs valides UNIQUEMENT pendant la durée de l'appel callback.
-	// Le backend reste propriétaire des buffers ; ne jamais les stocker/réutiliser
-	// après le retour du callback. Bloc supposé contigu et fourni tel quel par
-	// le backend concret — aucune garantie de continuité temporelle au niveau
-	// de cette interface abstraite.
-	struct Buffer {
-		float* const* inputs;
-		float* const* outputs;
-		uint32_t inputCount;
-		uint32_t outputCount;
-		uint32_t frames;
-	};
-
-	using Callback = void(*)(Buffer&, void* userData);
-
-	class Device {
-	public:
-		virtual ~Device() = default;
-
-		Device(const Device&) = delete;
-		Device& operator=(const Device&) = delete;
-		Device(Device&&) = delete;
-		Device& operator=(Device&&) = delete;
-
-		// Control plane : ne jamais appeler open/close/start/stop/reopen
-		// depuis le thread du callback audio (realtime plane).
-		//
-		// open(cfg) est une NÉGOCIATION, pas une garantie : le backend peut
-		// ajuster sampleRate/bufferSize/channels selon ses contraintes.
-		// Postcondition stricte : si open() retourne un succès, info_ DOIT
-		// être entièrement à jour et refléter l'état réel avant tout appel
-		// à start(). Un backend qui retourne succès sans info_ à jour
-		// viole le contrat de l'interface.
-		[[nodiscard]] virtual Result open(const DeviceConfig& cfg) = 0;
-		[[nodiscard]] virtual Result close() = 0;
-		[[nodiscard]] virtual Result start() = 0;
-		[[nodiscard]] virtual Result stop() = 0;
-
-		void setCallback(Callback callback, void* userData = nullptr) {
-			callback_ = callback;
-			userData_ = userData;
-		}
-
-		[[nodiscard]] const DeviceInfo& info() const { return info_; }
-
-		// Safe à appeler depuis n'importe quel thread, y compris le callback.
-		[[nodiscard]] State state() const { return state_.load(std::memory_order_acquire); }
-
-	protected:
-		Device() = default;
-
-		template<typename T>
-		[[nodiscard]] T* userData() const noexcept {
-			return static_cast<T*>(userData_);
-		}
-
-		Callback callback_ = nullptr;
-		void*    userData_ = nullptr;
-
-		std::atomic<State> state_{State::Closed};
-		DeviceInfo          info_ = {};
-	};
-}*/
