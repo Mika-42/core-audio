@@ -180,7 +180,7 @@ namespace mka::audio {
 	class Engine {
 		public:
 	
-		Engine(const EngineConfig& config) : routing_(config.channels) {
+		Engine(const EngineConfig& config) : routing(config.channels) {
 			workIn_.configure(config.channels, config.blockSize);
 			workOut_.configure(config.channels, config.blockSize);
 		}
