@@ -23,9 +23,10 @@ LIBS := $(PW_FLAGS) -lasound
 # Directories
 #=============================================================================#
 
-SRC_DIR := src
-OBJ_DIR := obj
 BUILD_DIR := build
+SRC_DIR := src
+TEST_DIR := test
+OBJ_DIR := $(BUILD_DIR)/obj
 INCLUDE_DIRS := $(addprefix -I,$(shell find $(SRC_DIR) -type d))
 
 EXAMPLE_DIR := example
@@ -36,11 +37,11 @@ EXAMPLE_BUILD_DIR := $(BUILD_DIR)/examples
 #=============================================================================#
 
 MODULE_SRCS := \
-	$(SRC_DIR)/utils/block.cppm \
-	$(SRC_DIR)/utils/routing_table.cppm \
-	$(SRC_DIR)/utils/audio_engine.cppm \
-    $(SRC_DIR)/abstract_backend.cppm  \
+	$(SRC_DIR)/abstract_backend.cppm  \
     $(SRC_DIR)/impl/alsa_backend.cppm
+#   $(SRC_DIR)/utils/block.cppm \
+#   $(SRC_DIR)/utils/routing_table.cppm \
+#   $(SRC_DIR)/utils/audio_engine.cppm
 #	$(SRC_DIR)/impl/alsa_impl.cppm
 
 MODULE_OBJS := $(patsubst $(SRC_DIR)/%.cppm,$(OBJ_DIR)/%.o,$(MODULE_SRCS))
@@ -63,15 +64,14 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cppm
 
 # Link main app
 $(APP): $(MODULE_OBJS) $(MAIN_SRC)
-	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) -fmodules $(MAIN_SRC) $(MODULE_OBJS) $(LIBS) -o $@
+	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) -fmodules $(MAIN_SRC) $(MODULE_OBJS) $(LIBS) -o $(BUILD_DIR)/$@
 
-# Build all examples
-examples: $(EXAMPLE_BINS)
+run:
+	./$(BUILD_DIR)/$(APP)
 
-$(EXAMPLE_BUILD_DIR)/%: $(EXAMPLE_DIR)/%.cpp $(MODULE_OBJS)
-	@mkdir -p $(dir $@)
-	$(CPP_COMPILER) $(CPP_VERSION) $(DBG_FLAGS) -fmodules $< $(MODULE_OBJS) $(LIBS) -o $@
-
+test:
+	$(CPP_COMPILER) $(TEST_DIR)/testALSA.cpp $(CPP_VERSION) -lgtest -lgtest_main -pthread -o testALSA -fmodules $(MODULE_OBJS) $(LIBS)
+	./testALSA$(LIBS)
 #=============================================================================#
 # Utilities
 #=============================================================================#
@@ -80,6 +80,6 @@ $(BUILD_DIR):
 	@mkdir -p $@
 
 clean:
-	rm -rf $(OBJ_DIR) $(APP) $(BUILD_DIR) gcm.cache
+	rm -rf $(BUILD_DIR)/* gcm.cache
 
-.PHONY: all clean examples
+.PHONY: all clean run test

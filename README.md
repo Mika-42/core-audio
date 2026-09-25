@@ -88,3 +88,14 @@ graph LR
 	style A fill:#007700
 	style G fill:#770000
 ```
+---
+
+## Audio pipeline graph
+
+```mermaid
+graph LR
+    A["get audio input pointer"]
+    B["resolve channel routing"]
+    C["cast and copy raw datas"]
+    A --> B --> C
+```
