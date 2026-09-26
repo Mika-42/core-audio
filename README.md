@@ -122,7 +122,7 @@ Conceptually, an endpoint contains an identity, its direction and information de
 
 ```mermaid
 classDiagram
-    class Endpoint {
+    class EndpointInfo {
         +EndpointID id
         +string name
         +EndpointDirection direction
@@ -136,12 +136,12 @@ classDiagram
         +buffer sizes
     }
 
-    Endpoint --> EndpointCapabilities
+    EndpointInfo --> EndpointCapabilities
 ```
 
 The framework does not require the application to construct large backend-specific device objects.
 
-Instead, endpoints are identified by a lightweight identifier and queried through the backend.
+Instead, endpoint identity and capabilities are returned together through `EndpointInfo`.
 
 ---
 
@@ -149,33 +149,32 @@ Instead, endpoints are identified by a lightweight identifier and queried throug
 
 Endpoint discovery is intentionally separated from opening an audio stream.
 
+The endpoint list contains the information required to identify and configure each endpoint. Endpoint capabilities are therefore returned together with the endpoint rather than being queried through a second operation.
+
 The general workflow is:
 
 ```mermaid
 flowchart TD
     LIST["getEndpointList()"]
-    IDS["Endpoint IDs"]
-    INFO["getEndpointInfo(id)"]
-    CAP["Endpoint information / capabilities"]
+    INFO["EndpointInfo"]
+    CAP["Endpoint capabilities"]
     CONFIG["Select configuration"]
     OPEN["open(config)"]
 
-    LIST --> IDS
-    IDS --> INFO
+    LIST --> INFO
     INFO --> CAP
     CAP --> CONFIG
     CONFIG --> OPEN
 ```
 
-This avoids requiring the backend to construct large device objects simply to enumerate available endpoints.
+This avoids an unnecessary request for every endpoint and keeps endpoint enumeration simple for the application.
 
 The application can therefore:
 
-1. Retrieve the available endpoint identifiers.
-2. Query the information associated with an endpoint.
-3. Inspect its capabilities.
-4. Select a configuration.
-5. Open the endpoint.
+1. Retrieve the available `EndpointInfo` objects.
+2. Inspect each endpoint's identity, direction and capabilities.
+3. Select an endpoint and configuration.
+4. Open the endpoint.
 
 ---
 
@@ -201,6 +200,22 @@ This allows a backend to expose a full-duplex audio endpoint without requiring s
 
 ---
 
+# Endpoint discovery API
+
+The endpoint discovery API exposes all currently available endpoints together with the information required to use them.
+
+Conceptually:
+
+```cpp
+std::vector<EndpointInfo> getEndpointList();
+```
+
+Each `EndpointInfo` contains the endpoint identity, direction and capabilities. No additional `getEndpointInfo()` call is required for normal endpoint discovery.
+
+The returned information is descriptive: it allows the application to choose a valid configuration before calling `open()`.
+
+---
+
 # Configuration
 
 Opening a stream is based on an explicit configuration.
@@ -220,7 +235,7 @@ Conceptually:
 
 ```cpp
 DeviceConfig config{
-    .deviceID        = "...",
+    .endpointID      = "...",
     .sampleRate      = 48000,
     .bufferSize      = 256,
     .inputChannels   = 2,
@@ -248,10 +263,7 @@ sequenceDiagram
     participant Backend
 
     App->>API: getEndpointList()
-    API-->>App: Endpoint IDs
-
-    App->>API: getEndpointInfo(id)
-    API-->>App: Endpoint capabilities
+    API-->>App: EndpointInfo + capabilities
 
     App->>API: open(config)
     API->>Backend: Validate configuration
@@ -570,9 +582,9 @@ The real-time callback should not use exceptions as a normal control-flow mechan
 
 ---
 
-# Backend capabilities
+# Endpoint capabilities
 
-Each backend can expose the capabilities supported by a given endpoint.
+Each endpoint exposes the capabilities supported by the underlying backend.
 
 These capabilities may include:
 
@@ -605,6 +617,7 @@ flowchart TD
 ```
 
 The project keeps the supported framework-level values centralized rather than duplicating them across every backend implementation.
+The backend reports the subset supported by each endpoint through `EndpointInfo`.
 
 This allows backend implementations to use the same definitions when reporting or validating capabilities.
 
@@ -853,8 +866,7 @@ The architecture can be understood as two separate planes.
 ```mermaid
 flowchart TB
     subgraph CONTROL["Control plane"]
-        ENUM["Endpoint discovery"]
-        INFO["Endpoint information"]
+        ENUM["Endpoint discovery + capabilities"]
         CONFIG["Configuration"]
         OPEN["Open / close"]
         START["Start / stop"]
@@ -971,7 +983,7 @@ Current development priorities include:
 * [x] Define backend abstraction
 * [x] Define stream lifecycle
 * [x] Define endpoint-oriented architecture
-* [x] Define endpoint information model
+* [x] Define combined endpoint information and capability model
 * [x] Define configuration model
 * [x] Define sample-format abstraction
 * [x] Define callback model
