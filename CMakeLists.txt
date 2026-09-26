@@ -50,8 +50,8 @@ FILE_SET CXX_MODULES
 BASE_DIRS
 src
 FILES
-src/core/abstract_backend.cppm
-src/core/audio_callback.cppm
+        src/core/backend.cppm
+        src/core/process.cppm
 src/core/endpoint.cppm
 src/core/constants.cppm
 src/core/error.cppm
@@ -182,6 +182,7 @@ add_executable(mka-core-audio-tests
         test/test_alsa.cpp
         test/test_jack.cpp
         test/test_pipewire.cpp
+        test/test_abstract_backend.cpp
 )
 
 target_link_libraries(mka-core-audio-tests
