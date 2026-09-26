@@ -50,8 +50,8 @@ FILE_SET CXX_MODULES
 BASE_DIRS
 src
 FILES
-        src/core/backend.cppm
-        src/core/process.cppm
+src/core/backend.cppm
+src/core/process.cppm
 src/core/endpoint.cppm
 src/core/constants.cppm
 src/core/error.cppm
