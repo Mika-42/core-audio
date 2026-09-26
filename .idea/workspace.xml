@@ -31,19 +31,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="b3890aa8-846e-4a14-8936-9ac3039b73c6" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/core-audio.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/core/error.cppm" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/test/test_alsa.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/test/test_jack.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/test/test_pipewire.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/editor.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/editor.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Makefile" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+    <list default="true" id="b3890aa8-846e-4a14-8936-9ac3039b73c6" name="Changes" comment="add test files and update project structure">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -57,6 +47,15 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {}
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "git@github.com:Mika-42/core-audio.git",
+    "accountId": "e32d6092-23d8-44c6-989e-a58350da6880"
+  }
+}]]></component>
   <component name="HighlightingSettingsPerFile">
     <setting file="mock:///home/mika/project/cpp/core-audio/src/core/audio_callback.cppm" root0="SKIP_HIGHLIGHTING" />
   </component>
@@ -236,6 +235,10 @@
         </entry>
       </map>
     </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="add test files and update project structure" />
+    <option name="LAST_COMMIT_MESSAGE" value="add test files and update project structure" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
