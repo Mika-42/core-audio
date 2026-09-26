@@ -1,4 +1,4 @@
 # directories
-cmake-build-debug
-cmake-build-default
-.idea
+cmake-build-debug/
+cmake-build-default/
+.idea/
