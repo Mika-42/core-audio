@@ -6,8 +6,8 @@ module;
 #include <expected>
 #include <vector>
 export module mka.audio.backend;
-import mka.audio.error;
-import mka.audio.endpoint;
+export import mka.audio.error;
+export import mka.audio.endpoint;
 import mka.audio.process;
 
 export namespace mka::audio {
@@ -53,6 +53,7 @@ export namespace mka::audio {
 
                 return stop_().and_then([&]() -> Result {
                    state = State::Open;
+                    return {};
                 });
             };
 
@@ -62,6 +63,7 @@ export namespace mka::audio {
                 }
                 return close_().and_then([&]() -> Result {
                     state = State::Closed;
+                    return {};
                 });
             };
 
