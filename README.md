@@ -1,195 +1,1107 @@
-## Minimal code example
-C++ version : 26
+# mka-core-audio
 
-### 1. import the audio core
+**mka-core-audio** is a C++ real-time audio framework designed to provide a **backend-agnostic, low-latency audio layer** for professional audio applications such as digital audio workstations (DAWs), synthesizers, audio plugins and signal-processing software.
 
-```cpp
-import audio.<type>;
-```
+The project is built around one central idea:
 
-| type      | alsa  | jack  | pipewire | pulseaudio | wasapi  | asio    | ds      | wmme    | coreaudio |
-|-----------|-------|-------|----------|------------|---------|---------|---------|---------|-----------|
-| supported | no    | yes   | no       | no         | no      | no      | no      | no      | no        |
-| plateform | linux | linux | linux    | linux      | windows | windows | windows | windows | macos     |
+> **Hide platform and audio-backend differences behind a small, predictable and real-time-safe C++ interface.**
 
+The framework is intended to become the audio foundation of a future DAW and other audio software developed within the MKA ecosystem.
 
-replace with the desire plateform.
+---
 
-### 2. configuration
+## Goals
 
-**2.1 - setup sampleRate (optionnal)**
+The main goals of the project are:
 
-```cpp
-engine.setSampleRate(<sampleRate>);
-```
+* Low-latency real-time audio processing
+* Cross-platform architecture
+* Backend-independent public API
+* Unified input/output endpoint model
+* Strict separation between control and real-time audio code
+* No dynamic allocation in the real-time processing path
+* Fixed-size framework processing blocks
+* Support for different backend buffer sizes
+* Unified floating-point audio buffers at the framework level
+* Minimal and predictable API
+* Modern C++ architecture using C++ modules
 
-**2.2 - setup blockSize (optionnal)**
+The framework is deliberately designed to avoid exposing backend-specific concepts to the rest of the application.
 
-```cpp
-engine.setBlockSize(<blockSize>);
-```
+---
 
-**2.3 - setup the callback function**
+## Architecture
 
-function signature
-
-```cpp
-void <callback_name>(mka::audio::Block& block);
-```
-> [!WARNING]
-> The callback function **must obligatory** respect this signature. 
-
-**2.4 - mka::audio::Block structure**
-
-```cpp
-block.blockSize;                     // read only uint32_t value
-block.sampleRate;                    // read only uint32_t value
-block.inputCount;                    // read only uint32_t value
-block.outputCount;                   // read only uint32_t value
-block.outputs[<channel>][<frame>];   // read and write float value
-block.inputs[<channel>][<frame>];    // read only float value
-```
-
-Thanks to this structure you can operate over the buffer and access to related datas like samplerate, channels and frames.
-
-### 3. pipeline
-
-your code must following this pipeline :
+The framework is organized into several layers.
 
 ```mermaid
-graph LR
-	A(("Begin"))
+flowchart TD
+    APP["Application / DAW"]
 
-	subgraph "Setup engine"
-		B1(["set callback"])
-		B2(["set sampleRate"])
-		B3(["set blockSize"])
-	end
+    API["mka-core-audio API"]
+    PROCESSING["Audio Processing Layer"]
+    BACKEND["Backend Abstraction"]
 
-	C(["open"])
-	D(["start"])
-	E(["stop"])
-	F(["close"])
-	G(("End"))
+    ALSA["ALSA"]
+    PIPEWIRE["PipeWire"]
+    JACK["JACK"]
+    WASAPI["WASAPI"]
+    COREAUDIO["CoreAudio"]
 
-	B3 --> C --> D --> E --> F --> G
-	A --> B1 --> B2 --> B3
-	classDef step fill:#775500
-  	class B1,B2,B3,C,D,E,F step;
-	style A fill:#007700
-	style G fill:#770000
+    APP --> API
+    API --> PROCESSING
+    PROCESSING --> BACKEND
+
+    BACKEND --> ALSA
+    BACKEND --> PIPEWIRE
+    BACKEND --> JACK
+    BACKEND --> WASAPI
+    BACKEND --> COREAUDIO
 ```
 
-### 4. Full code
+The application interacts only with the abstract audio interface.
 
-simple_tone_generator example : 
+Backend implementations are responsible for translating that interface into the native concepts of the underlying audio system.
+
+---
+
+# Backend abstraction
+
+A backend should not force the rest of the framework to understand its own API.
+
+For example:
+
+* ALSA exposes PCM devices and hardware parameters.
+* PipeWire exposes nodes and streams.
+* JACK exposes ports and clients.
+* CoreAudio exposes devices and streams.
+* WASAPI exposes devices and audio clients.
+
+These concepts are different, but the framework exposes them through a common abstraction.
+
+The backend therefore becomes an implementation detail.
+
+```mermaid
+flowchart LR
+    APP["Application"]
+
+    API["Framework API"]
+    BACKEND["Backend interface"]
+
+    ALSA["ALSA"]
+    PIPEWIRE["PipeWire"]
+    JACK["JACK"]
+    FUTURE["Other backends"]
+
+    APP --> API
+    API --> BACKEND
+
+    BACKEND --> ALSA
+    BACKEND --> PIPEWIRE
+    BACKEND --> JACK
+    BACKEND --> FUTURE
+```
+
+This makes it possible to change the audio backend without changing the audio engine itself.
+
+---
+
+# Endpoints
+
+The framework models audio connections through **endpoints**.
+
+An endpoint represents an audio input, output, or bidirectional connection exposed by a backend.
+
+An endpoint may therefore be:
+
+* input-only
+* output-only
+* input/output
+
+Conceptually, an endpoint contains an identity, its direction and information describing its capabilities.
+
+```mermaid
+classDiagram
+    class Endpoint {
+        +EndpointID id
+        +string name
+        +EndpointDirection direction
+        +EndpointCapabilities capabilities
+    }
+
+    class EndpointCapabilities {
+        +sample formats
+        +sample rates
+        +channel counts
+        +buffer sizes
+    }
+
+    Endpoint --> EndpointCapabilities
+```
+
+The framework does not require the application to construct large backend-specific device objects.
+
+Instead, endpoints are identified by a lightweight identifier and queried through the backend.
+
+---
+
+# Endpoint discovery
+
+Endpoint discovery is intentionally separated from opening an audio stream.
+
+The general workflow is:
+
+```mermaid
+flowchart TD
+    LIST["getEndpointList()"]
+    IDS["Endpoint IDs"]
+    INFO["getEndpointInfo(id)"]
+    CAP["Endpoint information / capabilities"]
+    CONFIG["Select configuration"]
+    OPEN["open(config)"]
+
+    LIST --> IDS
+    IDS --> INFO
+    INFO --> CAP
+    CAP --> CONFIG
+    CONFIG --> OPEN
+```
+
+This avoids requiring the backend to construct large device objects simply to enumerate available endpoints.
+
+The application can therefore:
+
+1. Retrieve the available endpoint identifiers.
+2. Query the information associated with an endpoint.
+3. Inspect its capabilities.
+4. Select a configuration.
+5. Open the endpoint.
+
+---
+
+# Endpoint direction
+
+An endpoint is not necessarily unidirectional.
+
+The abstraction supports three possible directions:
+
+```mermaid
+flowchart LR
+    INPUT["Input"]
+    OUTPUT["Output"]
+    DUPLEX["Input / Output"]
+
+    INPUT -->|"Audio enters framework"| ENGINE["Audio engine"]
+    ENGINE -->|"Audio leaves framework"| OUTPUT
+
+    DUPLEX <-->|"Full duplex"| ENGINE
+```
+
+This allows a backend to expose a full-duplex audio endpoint without requiring separate input and output device abstractions.
+
+---
+
+# Configuration
+
+Opening a stream is based on an explicit configuration.
+
+The application specifies the parameters it wants rather than relying on an implicit configuration chosen by the backend.
+
+Typical parameters include:
+
+* input channel count
+* output channel count
+* sample rate
+* buffer size
+* sample format
+* selected endpoint
+
+Conceptually:
 
 ```cpp
-#include <print>
-#include <iostream>
-#include <limits>
-#include <cmath>
-
-import audio.jack;
-
-void audio_callback(mka::audio::Block& block) {
-	static float phase = {};
-	constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
-	const float phaseIncrement = twoPi * 440.0f / static_cast<float>(block.sampleRate);
-
-	for(uint32_t i = 0; i < block.blockSize; ++i) {
-		float sample = sinf(phase);
-
-		phase += phaseIncrement;
-		if (phase >= twoPi) {
-			phase -= twoPi;
-		}
-
-		for(uint32_t ch = 0; ch < block.outputCount; ++ch) {
-			block.outputs[ch][i] = sample;
-		}
-	}
-}
-
-int main() {
-	mka::audio::JACK engine;
-
-	// [0] list all availables channels
-	auto channels = engine.getChannels();
-    for (auto& ch : channels) {	
-		std::println("channel name:\t{}", ch.name);
-		std::println("direction:\t{}\n", ch.direction == mka::audio::Direction::In ? "Input" : "Output");
-    }
-
-	// [1] select one of them
-	int choice = 0;
-	std::print(">> enter number: ");
-	std::cin >> choice;
-
-	// [2] setup the engine
-	engine.setCallback(audio_callback);
-	engine.setSampleRate(48'000);
-	engine.setBlockSize(1024);
-
-	// [3] open the desire channel
-	auto ret = engine.open(channels[choice]);
-	if(!ret.ok()) {
-        std::println("error::{}", ret.message);
-        return -1;
-    }
-
-	// [4] start the engine
-	engine.start();
-
-	std::println("press any key to stop audio...");
-	std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-	std::cin.get();
-
-	// [5] stop the engine
-	engine.stop();
-
-	// [6] close the engine
-	ret = engine.close();
-	if(!ret.ok()) {
-        std::println("error::{}", ret.message);
-        return -1;
-    }
-
-	return 0;
-}
-```
-### 5. Implementation detail
-
-```lexicon
-N : Number of frames the backend can proccessed
+DeviceConfig config{
+    .deviceID        = "...",
+    .sampleRate      = 48000,
+    .bufferSize      = 256,
+    .inputChannels   = 2,
+    .outputChannels  = 2,
+    .sampleFormat    = SampleFormat::Float32
+};
 ```
 
-```algorithm
-# step 1
-for each channel in input_channels
-	input_pointer ← engine.backend_input_audio_pointer[channel.index]
+The backend is responsible for determining whether that configuration can actually be provided.
 
-	if channel.device.sample_rate ≠ engine.sample_rate
-		channel.scratch_buffer ← input_pointer[0..N].copy()
-		produced_frames ← channel.input_resampler(
-			data: channel.scratch_buffer,
-			length: N,
-			source_sample_rate: channel.device.sample_rate,
-			destination_sample_rate: engine.sample_rate
-		)
+A configuration mismatch must be reported explicitly rather than silently changing the requested parameters.
 
-		channel.ring_buffer.push(data: channel.scratch_buffer, length: produced_frames)
-	else
-		channel.ring_buffer.push(data: input_pointer, length: N)
-	endif
-done
+This keeps the behavior deterministic and prevents the application from unknowingly running with a different audio configuration.
 
-# step 2
-# step 3
+---
 
-# step 4
-for each channel in output_channels
-	output_pointer ← engine.backend_output_audio_pointer[channel.index]
-done
+# Configuration negotiation
 
+The framework intentionally distinguishes **capability discovery** from **configuration validation**.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant API as mka-core-audio
+    participant Backend
+
+    App->>API: getEndpointList()
+    API-->>App: Endpoint IDs
+
+    App->>API: getEndpointInfo(id)
+    API-->>App: Endpoint capabilities
+
+    App->>API: open(config)
+    API->>Backend: Validate configuration
+
+    alt Configuration supported
+        Backend-->>API: Success
+        API-->>App: Opened
+    else Configuration unsupported
+        Backend-->>API: Error
+        API-->>App: Configuration error
+    end
 ```
+
+The framework does not silently replace an unsupported configuration with another configuration.
+
+If negotiation or validation fails, the caller receives an explicit error.
+
+---
+
+# Supported sample formats
+
+The framework defines a backend-independent representation of sample formats.
+
+Currently considered formats include:
+
+```text
+Int16
+Int24
+Int32
+Float32
+Float64
+```
+
+The backend may use a native representation internally.
+
+```mermaid
+flowchart LR
+    NATIVE["Backend native sample format"]
+    CONVERT["Format conversion"]
+    FRAMEWORK["Framework audio buffers"]
+    DSP["DSP"]
+
+    NATIVE --> CONVERT
+    CONVERT --> FRAMEWORK
+    FRAMEWORK --> DSP
+```
+
+The goal is to keep DSP code independent from the hardware's native sample representation.
+
+---
+
+# Planar audio buffers
+
+The framework uses a **planar channel representation** at the processing boundary.
+
+Instead of interleaved samples:
+
+```text
+L R L R L R L R
+```
+
+audio is represented as independent channel buffers:
+
+```text
+Channel 0:
+L L L L L L
+
+Channel 1:
+R R R R R R
+```
+
+Conceptually:
+
+```cpp
+float* channels[] = {
+    left,
+    right
+};
+```
+
+The memory model can be represented as:
+
+```mermaid
+flowchart TD
+    BUFFER["Audio buffer"]
+
+    C0["Channel 0"]
+    C1["Channel 1"]
+    C2["Channel 2"]
+    CN["Channel N"]
+
+    BUFFER --> C0
+    BUFFER --> C1
+    BUFFER --> C2
+    BUFFER --> CN
+```
+
+This representation has several advantages for DSP processing:
+
+* direct per-channel processing
+* predictable memory access
+* easier SIMD/vectorization
+* straightforward channel routing
+* no interleaving/deinterleaving in DSP code
+
+Backend-specific interleaved formats are converted at the backend boundary when necessary.
+
+---
+
+# Real-time processing
+
+Real-time safety is one of the fundamental requirements of the project.
+
+The audio processing path must be deterministic and must avoid operations that can introduce unpredictable latency.
+
+The real-time path should therefore avoid:
+
+* dynamic memory allocation
+* deallocation
+* mutex locking
+* filesystem operations
+* blocking I/O
+* logging
+* expensive system calls
+* unbounded operations
+
+The callback must operate only on resources prepared before the stream starts.
+
+```mermaid
+flowchart TD
+    CONTROL["Control thread"]
+
+    INIT["Initialization / allocation"]
+    READY["Pre-allocated resources"]
+
+    RT["Real-time audio thread"]
+    CALLBACK["Audio callback"]
+    DSP["DSP processing"]
+
+    CONTROL --> INIT
+    INIT --> READY
+    READY --> RT
+    RT --> CALLBACK
+    CALLBACK --> DSP
+```
+
+Anything requiring allocation or potentially blocking behavior belongs outside the real-time path.
+
+---
+
+# Fixed-size processing blocks
+
+One important architectural distinction is made between:
+
+1. backend buffer size
+2. framework processing block size
+3. DSP-specific processing size
+4. algorithmic window size
+
+These are not necessarily the same thing.
+
+The backend may provide buffers whose size differs from the framework's processing block.
+
+The framework therefore acts as a boundary between the external audio world and the deterministic DSP world.
+
+```mermaid
+flowchart LR
+    BACKEND["Backend"]
+    BUFFER["Backend buffers"]
+    NORMALIZE["Buffer normalization / accumulation"]
+    BLOCKS["Fixed-size framework blocks"]
+    DSP["DSP"]
+
+    BACKEND --> BUFFER
+    BUFFER --> NORMALIZE
+    NORMALIZE --> BLOCKS
+    BLOCKS --> DSP
+```
+
+This means DSP implementations do not need to individually handle backend-specific buffer irregularities.
+
+The accumulation required to transform backend buffers into framework blocks belongs to the framework itself.
+
+Algorithm-specific buffering remains the responsibility of the DSP component.
+
+---
+
+# Callback
+
+Once a stream is running, audio processing is performed through a user-defined callback.
+
+Conceptually:
+
+```cpp
+setCallback(callback);
+```
+
+The callback receives the audio buffers for the current processing block.
+
+A simplified representation is:
+
+```cpp
+struct Buffer
+{
+    float** inputs;
+    float** outputs;
+
+    uint32_t inputCount;
+    uint32_t outputCount;
+
+    uint32_t frames;
+};
+```
+
+The callback is executed from the real-time audio processing context.
+
+Therefore, callback code must follow the same real-time constraints as the framework itself.
+
+The callback processing flow is:
+
+```mermaid
+flowchart TD
+    AUDIO["Audio thread"]
+    INPUT["Input buffers"]
+    CALLBACK["User callback"]
+    OUTPUT["Output buffers"]
+    BACKEND["Backend"]
+
+    AUDIO --> INPUT
+    INPUT --> CALLBACK
+    CALLBACK --> OUTPUT
+    OUTPUT --> BACKEND
+```
+
+---
+
+# Stream lifecycle
+
+The stream lifecycle is deliberately small.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+
+    Closed --> Open: open()
+    Open --> Running: start()
+    Running --> Open: stop()
+    Open --> Closed: close()
+```
+
+The intended public operations are:
+
+```text
+open()
+start()
+stop()
+close()
+```
+
+## `open()`
+
+Creates and configures the stream using the requested configuration.
+
+It may perform:
+
+* endpoint validation
+* backend resource creation
+* format negotiation
+* buffer allocation
+* internal initialization
+
+It must not silently substitute incompatible parameters.
+
+## `start()`
+
+Starts real-time processing.
+
+After `start()`, the callback may be invoked by the backend.
+
+## `stop()`
+
+Stops real-time processing while keeping the stream open.
+
+## `close()`
+
+Releases resources associated with the stream.
+
+The public API is designed so that lifecycle errors are returned as explicit error results rather than being communicated through exceptions.
+
+---
+
+# Error handling
+
+The audio API uses explicit result/error reporting for operations that can fail.
+
+This is particularly important for lifecycle functions such as:
+
+```text
+open
+start
+stop
+close
+```
+
+Errors may originate from:
+
+* invalid state transitions
+* unsupported configurations
+* unavailable endpoints
+* backend failures
+* stream negotiation failures
+* allocation failures
+* runtime audio errors
+
+The real-time callback should not use exceptions as a normal control-flow mechanism.
+
+---
+
+# Backend capabilities
+
+Each backend can expose the capabilities supported by a given endpoint.
+
+These capabilities may include:
+
+```text
+Sample formats
+Sample rates
+Channel counts
+Buffer sizes
+Input support
+Output support
+```
+
+Conceptually:
+
+```mermaid
+flowchart TD
+    ENDPOINT["Endpoint"]
+
+    FORMAT["Sample formats"]
+    RATE["Sample rates"]
+    CHANNELS["Channel counts"]
+    BUFFER["Buffer sizes"]
+    DIRECTION["Input / output support"]
+
+    ENDPOINT --> FORMAT
+    ENDPOINT --> RATE
+    ENDPOINT --> CHANNELS
+    ENDPOINT --> BUFFER
+    ENDPOINT --> DIRECTION
+```
+
+The project keeps the supported framework-level values centralized rather than duplicating them across every backend implementation.
+
+This allows backend implementations to use the same definitions when reporting or validating capabilities.
+
+---
+
+# Linux backends
+
+Linux is currently the primary development platform.
+
+The project targets several Linux audio systems.
+
+```mermaid
+flowchart TD
+    CORE["mka-core-audio"]
+
+    LINUX["Linux"]
+
+    ALSA["ALSA"]
+    PIPEWIRE["PipeWire"]
+    JACK["JACK"]
+
+    CORE --> LINUX
+    LINUX --> ALSA
+    LINUX --> PIPEWIRE
+    LINUX --> JACK
+```
+
+---
+
+# ALSA
+
+ALSA provides direct access to Linux PCM audio devices.
+
+The ALSA backend is intended to provide:
+
+* device enumeration
+* hardware capability inspection
+* full-duplex streams
+* low-level buffer access
+* mmap-based processing where appropriate
+* native sample-format handling
+
+ALSA is particularly useful when the framework needs direct and predictable access to an audio device.
+
+A simplified architecture is:
+
+```mermaid
+flowchart LR
+    API["mka-core-audio"]
+    ALSA_BACKEND["ALSA backend"]
+    PCM["ALSA PCM"]
+    DEVICE["Audio device"]
+
+    API --> ALSA_BACKEND
+    ALSA_BACKEND --> PCM
+    PCM --> DEVICE
+```
+
+---
+
+# PipeWire
+
+PipeWire is supported as a higher-level Linux audio backend.
+
+The backend uses PipeWire streams to integrate the framework with the PipeWire graph.
+
+Conceptually:
+
+```mermaid
+flowchart LR
+    CORE["mka-core-audio"]
+    BACKEND["PipeWire backend"]
+    STREAM["pw_stream"]
+    PW["PipeWire"]
+    WP["WirePlumber"]
+
+    CORE --> BACKEND
+    BACKEND --> STREAM
+    STREAM --> PW
+    WP --> PW
+```
+
+PipeWire may provide different timing and buffering characteristics from a directly controlled ALSA stream.
+
+The backend therefore handles the required buffering and conversion internally so that the public framework interface remains consistent.
+
+---
+
+# JACK
+
+JACK is part of the intended Linux backend architecture.
+
+Its port-oriented model fits naturally with the framework's endpoint abstraction and is particularly useful for routing audio between professional audio applications.
+
+The framework should expose JACK-specific functionality through the generic endpoint API rather than requiring the application to depend directly on JACK.
+
+```mermaid
+flowchart LR
+    APP["Application"]
+    CORE["mka-core-audio"]
+    JACK_BACKEND["JACK backend"]
+    JACK["JACK"]
+    PORTS["JACK ports"]
+
+    APP --> CORE
+    CORE --> JACK_BACKEND
+    JACK_BACKEND --> JACK
+    JACK --> PORTS
+```
+
+---
+
+# Cross-platform backends
+
+The architecture is intended to support additional native backends without changing the public audio API.
+
+| Platform | Backend   |
+| -------- | --------- |
+| Linux    | ALSA      |
+| Linux    | PipeWire  |
+| Linux    | JACK      |
+| Windows  | WASAPI    |
+| macOS    | CoreAudio |
+
+The exact implementation status of each backend may differ during development.
+
+The abstraction is intentionally designed so that adding a backend does not require changes to the DSP layer.
+
+```mermaid
+flowchart TD
+    API["mka-core-audio API"]
+
+    LINUX["Linux"]
+    WINDOWS["Windows"]
+    MACOS["macOS"]
+
+    ALSA["ALSA"]
+    PIPEWIRE["PipeWire"]
+    JACK["JACK"]
+
+    WASAPI["WASAPI"]
+    COREAUDIO["CoreAudio"]
+
+    API --> LINUX
+    API --> WINDOWS
+    API --> MACOS
+
+    LINUX --> ALSA
+    LINUX --> PIPEWIRE
+    LINUX --> JACK
+
+    WINDOWS --> WASAPI
+    MACOS --> COREAUDIO
+```
+
+---
+
+# Backend-independent design
+
+A central design rule is:
+
+> **Backend-specific code stays inside the backend.**
+
+For example, DSP code should not contain:
+
+```cpp
+snd_pcm_*
+pw_*
+jack_*
+IAudioClient*
+AudioUnit*
+```
+
+Instead, it should only interact with framework-level concepts:
+
+```cpp
+Endpoint
+EndpointInfo
+DeviceConfig
+Buffer
+SampleFormat
+Result
+Callback
+```
+
+The separation can be represented as:
+
+```mermaid
+flowchart LR
+    DSP["DSP / Audio engine"]
+
+    API["Framework API"]
+
+    ALSA["ALSA implementation"]
+    PIPEWIRE["PipeWire implementation"]
+    JACK["JACK implementation"]
+    OTHER["Other backend implementations"]
+
+    DSP --> API
+
+    API --> ALSA
+    API --> PIPEWIRE
+    API --> JACK
+    API --> OTHER
+```
+
+This keeps the audio engine portable.
+
+---
+
+# Threading model
+
+The framework separates control operations from real-time processing.
+
+```mermaid
+flowchart TD
+    CONTROL["Control thread"]
+
+    OPEN["open()"]
+    CONFIG["Configuration"]
+    CLOSE["close()"]
+
+    RT["Real-time audio thread"]
+    CALLBACK["callback()"]
+    DSP["DSP"]
+
+    CONTROL --> OPEN
+    CONTROL --> CONFIG
+    CONTROL --> CLOSE
+
+    OPEN --> RT
+    RT --> CALLBACK
+    CALLBACK --> DSP
+```
+
+Control operations may allocate memory, communicate with the operating system and perform backend-specific setup.
+
+The audio thread must operate on resources prepared beforehand.
+
+---
+
+# Control plane and audio plane
+
+The architecture can be understood as two separate planes.
+
+```mermaid
+flowchart TB
+    subgraph CONTROL["Control plane"]
+        ENUM["Endpoint discovery"]
+        INFO["Endpoint information"]
+        CONFIG["Configuration"]
+        OPEN["Open / close"]
+        START["Start / stop"]
+    end
+
+    subgraph AUDIO["Real-time audio plane"]
+        CALLBACK["Audio callback"]
+        BUFFER["Audio buffers"]
+        DSP["DSP processing"]
+    end
+
+    CONTROL --> AUDIO
+```
+
+The control plane manages the lifetime and configuration of the audio system.
+
+The audio plane processes samples under strict real-time constraints.
+
+This separation is fundamental to the architecture.
+
+---
+
+# Project structure
+
+The project is organized around a separation between the public abstraction and backend implementations.
+
+A conceptual structure is:
+
+```text
+src/
+├── abstract_core.cppm
+│
+├── utils/
+│   ├── config.cppm
+│   ├── constants.cppm
+│   └── error.cppm
+│
+└── impl/
+    ├── alsa_impl.cppm
+    ├── pipewire_impl.cppm
+    └── ...
+```
+
+The exact directory structure is expected to evolve with the implementation.
+
+---
+
+# C++ standard
+
+The project targets modern C++ and currently uses **C++26**.
+
+The implementation makes use of C++ modules to organize the framework.
+
+The architecture is based around modules such as:
+
+```text
+audio.abstract_core
+audio.config
+audio.constants
+audio.error
+audio.alsa
+audio.pipewire
+...
+```
+
+The exact module organization may evolve as the project matures.
+
+---
+
+# Design principles
+
+The project follows a few simple principles.
+
+## KISS
+
+Keep the public API small.
+
+The framework should expose the concepts required by an audio engine without reproducing every concept of every backend.
+
+## YAGNI
+
+Backend-specific features should not become part of the abstraction unless they are genuinely required.
+
+## Real-time first
+
+Anything that can compromise deterministic audio processing must be isolated from the real-time path.
+
+## Backend independence
+
+The application should not need to know whether audio is ultimately provided by ALSA, PipeWire, JACK, CoreAudio or WASAPI.
+
+## Explicit behavior
+
+Configuration, state transitions and errors should be explicit rather than implicit.
+
+## Pre-allocation
+
+Memory required by the audio processing path should be prepared before entering the real-time state.
+
+## Separation of responsibilities
+
+Backend adaptation, buffer normalization and DSP processing are distinct responsibilities and should remain separate.
+
+---
+
+# Development status
+
+The project is currently under active development.
+
+The architecture is being established before expanding the number of supported backends.
+
+Current development priorities include:
+
+* [x] Define backend abstraction
+* [x] Define stream lifecycle
+* [x] Define endpoint-oriented architecture
+* [x] Define endpoint information model
+* [x] Define configuration model
+* [x] Define sample-format abstraction
+* [x] Define callback model
+* [ ] Finalize endpoint capability representation
+* [ ] Finalize real-time buffer abstraction
+* [ ] Implement complete ALSA backend
+* [ ] Implement complete PipeWire backend
+* [ ] Implement JACK backend
+* [ ] Implement fixed-size framework block accumulation
+* [ ] Add comprehensive backend tests
+* [ ] Add real-time safety tests
+* [ ] Add performance/latency benchmarks
+* [ ] Add Windows backend
+* [ ] Add macOS backend
+
+The API is expected to change while the architecture is being validated.
+
+---
+
+# Future architecture
+
+The long-term goal is to use `mka-core-audio` as the foundation of a complete audio engine.
+
+A possible future architecture is:
+
+```mermaid
+flowchart TD
+    DAW["DAW"]
+
+    PROJECT["Project"]
+    UI["UI layer"]
+
+    ENGINE["Audio engine"]
+
+    GRAPH["Audio graph"]
+    SCHEDULER["Scheduler"]
+
+    CORE["mka-core-audio"]
+
+    ALSA["ALSA"]
+    PIPEWIRE["PipeWire"]
+    JACK["JACK"]
+    WASAPI["WASAPI"]
+    COREAUDIO["CoreAudio"]
+
+    DAW --> PROJECT
+    DAW --> UI
+    DAW --> ENGINE
+
+    ENGINE --> GRAPH
+    ENGINE --> SCHEDULER
+
+    GRAPH --> CORE
+    SCHEDULER --> CORE
+
+    CORE --> ALSA
+    CORE --> PIPEWIRE
+    CORE --> JACK
+    CORE --> WASAPI
+    CORE --> COREAUDIO
+```
+
+The audio layer should remain independent from the higher-level DAW graph, UI and project-management systems.
+
+---
+
+# Why build another audio abstraction?
+
+Existing audio frameworks solve many of the same problems, but this project has a different objective:
+
+**to build the complete stack from first principles and maintain full control over the architecture.**
+
+The project is therefore intentionally focused on:
+
+* understanding the underlying audio systems
+* controlling the real-time architecture
+* minimizing abstraction overhead
+* keeping the public API small
+* learning how professional audio pipelines actually work
+* creating a foundation that can later be integrated into a custom DAW
+
+This is an engineering project as much as it is a reusable library.
+
+---
+
+# Non-goals
+
+The project is not intended to:
+
+* replace a DSP library
+* provide a complete DAW by itself
+* expose every feature of every backend
+* hide all platform-specific behavior at any cost
+* perform non-real-time audio processing inside the callback
+* provide a GUI
+* provide plugin hosting by itself
+
+Those responsibilities belong to higher layers of the future audio stack.
+
+---
+
+# Performance philosophy
+
+Audio performance is not measured solely by raw throughput.
+
+The framework prioritizes:
+
+1. deterministic execution
+2. predictable memory access
+3. bounded processing time
+4. low latency
+5. minimal synchronization
+6. backend-independent behavior
+
+A slightly more complex architecture is acceptable when it prevents backend irregularities from leaking into every DSP component.
+
+The goal is therefore not simply:
+
+```text
+"process audio as fast as possible"
+```
+
+but rather:
+
+```text
+"process audio predictably, continuously and with bounded latency"
+```
+
+---
+
+# License
+
+License information has not yet been finalized.
