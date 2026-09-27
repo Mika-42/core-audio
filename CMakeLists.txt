@@ -179,11 +179,29 @@ find_package(GTest REQUIRED)
 # --------------------------------------------------------
 
 add_executable(mka-core-audio-tests
+        test/test_abstract_backend.cpp
         test/test_alsa.cpp
         test/test_jack.cpp
         test/test_pipewire.cpp
-        test/test_abstract_backend.cpp
 )
+
+target_link_libraries(mka-core-audio-tests
+        PRIVATE
+        mka-audio-alsa
+        GTest::gtest_main
+)
+
+#target_link_libraries(mka-core-audio-tests
+#        PRIVATE
+#        mka-audio-pipewire
+#        GTest::gtest_main
+#)
+
+#target_link_libraries(mka-core-audio-tests
+#        PRIVATE
+#        mka-audio-jack
+#        GTest::gtest_main
+#)
 
 target_link_libraries(mka-core-audio-tests
 PRIVATE

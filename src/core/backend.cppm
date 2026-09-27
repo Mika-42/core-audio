@@ -22,7 +22,7 @@ export namespace mka::audio {
             Backend(Backend&&) = delete;
             Backend& operator=(Backend&&) = delete;
 
-            virtual Result open(EndpointConfig const &endpointCfg) final {
+            [[nodiscard]] virtual Result open(EndpointConfig const &endpointCfg) final {
                 if (state != State::Closed) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -33,7 +33,7 @@ export namespace mka::audio {
                 });
             }
 
-            virtual Result setProcessFunction(const ProcessFunction callback) final {
+            [[nodiscard]] virtual Result setProcessFunction(const ProcessFunction callback) final {
                 if (state == State::Running) {
                     return std::unexpected{ ErrorType::InvalidState};
                 }
@@ -42,7 +42,7 @@ export namespace mka::audio {
                 return {};
             }
 
-            virtual Result start() final {
+            [[nodiscard]] virtual Result start() final {
                 if (state != State::Open) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -53,7 +53,7 @@ export namespace mka::audio {
                 });
             }
 
-            virtual Result stop() final {
+            [[nodiscard]] virtual Result stop() final {
                 if (state != State::Running) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -64,7 +64,7 @@ export namespace mka::audio {
                 });
             };
 
-            virtual Result close() final {
+            [[nodiscard]] virtual Result close() final {
                 if (state != State::Open) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -80,10 +80,10 @@ export namespace mka::audio {
 
         protected:
             [[nodiscard]] virtual std::vector<Endpoint> getEndPoints_() const = 0;
-            virtual Result open_(EndpointConfig const &endpointCfg) = 0;
-            virtual Result start_() = 0;
-            virtual Result stop_() = 0;
-            virtual Result close_() = 0;
+            [[nodiscard]] virtual Result open_(EndpointConfig const &endpointCfg) = 0;
+            [[nodiscard]] virtual Result start_() = 0;
+            [[nodiscard]] virtual Result stop_() = 0;
+            [[nodiscard]] virtual Result close_() = 0;
 
         private:
             enum class State { Closed, Open, Running };

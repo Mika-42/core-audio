@@ -84,19 +84,19 @@ export namespace mka::audio {
             return endpoints;
         }
 
-        Result open_(EndpointConfig const &endpointCfg) override {
+        [[nodiscard]] Result open_(EndpointConfig const &endpointCfg) override {
             return {};
         }
 
-        Result start_() override {
+        [[nodiscard]] Result start_() override {
             return {};
         }
 
-        Result stop_() override {
+        [[nodiscard]] Result stop_() override {
             return {};
         }
 
-        Result close_() override {
+        [[nodiscard]] Result close_() override {
             return {};
         }
 
