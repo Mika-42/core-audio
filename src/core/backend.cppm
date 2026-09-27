@@ -85,10 +85,11 @@ export namespace mka::audio {
             [[nodiscard]] virtual Result stop_() = 0;
             [[nodiscard]] virtual Result close_() = 0;
 
+            ProcessFunction callback = nullptr;
         private:
             enum class State { Closed, Open, Running };
             State state = State::Closed;
-            ProcessFunction callback = nullptr;
+
     };
 
 }
