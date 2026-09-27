@@ -92,7 +92,7 @@ mka::audio::Result execute(
 }
 
 TEST_P(InvalidTransitionTest, RejectsTransition) {
-    BackendImpl backend;
+    BackendImpl backend = {};
 
     for (const auto operation : GetParam().setup) {
         ASSERT_TRUE(execute(backend, operation));
@@ -142,68 +142,7 @@ INSTANTIATE_TEST_SUITE_P(
         }
     )
 );
-//--- TEST NO THROW
-TEST(AbstractBackendTest, TestOpenNoThrow) {
-    BackendImpl backend;
 
-    EXPECT_NO_THROW({
-        auto res = backend.open({});
-        EXPECT_TRUE(res);
-    });
-}
-
-TEST(AbstractBackendTest, TestStartNoThrow) {
-    BackendImpl backend;
-
-    ASSERT_TRUE(backend.open({}));
-
-    EXPECT_NO_THROW({
-        auto res = backend.start();
-        EXPECT_TRUE(res);
-    });
-}
-
-TEST(AbstractBackendTest, TestStopNoThrow) {
-    BackendImpl backend;
-
-    ASSERT_TRUE(backend.open({}));
-    ASSERT_TRUE(backend.start());
-
-    EXPECT_NO_THROW({
-        auto res = backend.stop();
-        EXPECT_TRUE(res);
-    });
-}
-
-TEST(AbstractBackendTest, TestCloseNoThrow) {
-    BackendImpl backend;
-
-    ASSERT_TRUE(backend.open({}));
-    ASSERT_TRUE(backend.start());
-    ASSERT_TRUE(backend.stop());
-
-    EXPECT_NO_THROW({
-        auto res = backend.close();
-        EXPECT_TRUE(res);
-    });
-}
-
-TEST(AbstractBackendTest, TestGetEndpointNoThrow) {
-    const BackendImpl backend;
-
-    EXPECT_NO_THROW({
-        auto res = backend.getEndPoints();
-    });
-}
-
-TEST(AbstractBackendTest, TestSetProcessFunctionNoThrow) {
-    BackendImpl backend;
-
-    EXPECT_NO_THROW({
-        auto res = backend.setProcessFunction(nullptr);
-        ASSERT_TRUE(res);
-    });
-}
 //--- TEST RIGHT PIPELINE
 TEST(AbstractBackendTest, TestRightPipeline) {
     BackendImpl backend;

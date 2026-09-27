@@ -2,20 +2,27 @@
 // Created by mika on 9/24/26.
 //
 module;
-#include <cstdint>
 #include <expected>
 #include <vector>
 export module mka.audio.backend;
 export import mka.audio.error;
 export import mka.audio.endpoint;
+export import mka.audio.constants;
 import mka.audio.process;
 
 export namespace mka::audio {
     class Backend {
         public:
+            Backend() noexcept = default;
             virtual ~Backend() = default;
 
-            virtual Result open(EndpointConfig const &endpointCfg) noexcept final {
+            Backend(const Backend&) = delete;
+            Backend& operator=(const Backend&) = delete;
+
+            Backend(Backend&&) = delete;
+            Backend& operator=(Backend&&) = delete;
+
+            virtual Result open(EndpointConfig const &endpointCfg) final {
                 if (state != State::Closed) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -26,7 +33,7 @@ export namespace mka::audio {
                 });
             }
 
-            virtual Result setProcessFunction(const ProcessFunction callback) noexcept final {
+            virtual Result setProcessFunction(const ProcessFunction callback) final {
                 if (state == State::Running) {
                     return std::unexpected{ ErrorType::InvalidState};
                 }
@@ -35,7 +42,7 @@ export namespace mka::audio {
                 return {};
             }
 
-            virtual Result start() noexcept final {
+            virtual Result start() final {
                 if (state != State::Open) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -46,7 +53,7 @@ export namespace mka::audio {
                 });
             }
 
-            virtual Result stop() noexcept final {
+            virtual Result stop() final {
                 if (state != State::Running) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -57,7 +64,7 @@ export namespace mka::audio {
                 });
             };
 
-            virtual Result close() noexcept final {
+            virtual Result close() final {
                 if (state != State::Open) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -67,16 +74,16 @@ export namespace mka::audio {
                 });
             };
 
-            virtual std::vector<Endpoint> getEndPoints() const noexcept final {
+            [[nodiscard]] virtual std::vector<Endpoint> getEndPoints() const final {
                 return getEndPoints_();
             }
 
         protected:
-            virtual std::vector<Endpoint> getEndPoints_() const noexcept = 0;
-            virtual Result open_(EndpointConfig const &endpointCfg) noexcept = 0;
-            virtual Result start_() noexcept = 0;
-            virtual Result stop_() noexcept = 0;
-            virtual Result close_() noexcept = 0;
+            [[nodiscard]] virtual std::vector<Endpoint> getEndPoints_() const = 0;
+            virtual Result open_(EndpointConfig const &endpointCfg) = 0;
+            virtual Result start_() = 0;
+            virtual Result stop_() = 0;
+            virtual Result close_() = 0;
 
         private:
             enum class State { Closed, Open, Running };
