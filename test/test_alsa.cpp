@@ -17,28 +17,48 @@ static const char* fmtToStr(mka::audio::Format format) {
     std::unreachable();
 }
 
+static void printCaps(const mka::audio::StreamCapabilities& caps) {
+    std::println("  channels: {} - {}", caps.minChannels, caps.maxChannels);
+
+    std::print("  sample rates: ");
+    for (const auto& sampleRate : caps.sampleRates) {
+        std::print("{}, ", sampleRate);
+    }
+    std::print("\n  formats: ");
+    for (const auto& format : caps.formats) {
+        std::print("{}, ", fmtToStr(format));
+    }
+    std::print("\n  buffer sizes: ");
+    for (const auto& bufferSize : caps.bufferSizes) {
+        std::print("{}, ", bufferSize);
+    }
+    std::println("");
+}
+
 TEST(ALSABackendTest, TestGetEndPoints) {
     const mka::audio::ALSA alsa;
-    const auto endpoints = alsa.getEndPoints();
 
-    for (const auto& endpoint : endpoints) {
+    for (const auto endpoints = alsa.getEndPoints(); const auto& endpoint : endpoints) {
         std::println("id: {}", endpoint.id);
         std::println("name: {}", endpoint.name);
-        std::println("direction: {}", endpoint.direction == mka::audio::Direction::Input ? "input" : endpoint.direction == mka::audio::Direction::Output ? "output" : "duplex");
-        std::println("input channel count: {}", endpoint.inputChannelCount);
-        std::println("output channel count: {}", endpoint.outputChannelCount);
-        std::print("input sample rate: ");
-        for (const auto& sampleRate : endpoint.sampleRates) {
-            std::print("{}, ", sampleRate);
+
+        if (endpoint.input) {
+            std::println("input:");
+            printCaps(*endpoint.input);
         }
-        std::print("\nformats: ");
-        for (const auto& format : endpoint.formats) {
-            std::print("{}, ", fmtToStr(format));
+        if (endpoint.output) {
+            std::println("output:");
+            printCaps(*endpoint.output);
         }
-        std::print("\nbuffer size: ");
-        for (const auto& bufferSize : endpoint.bufferSizes) {
-            std::print("{}, ", bufferSize);
-        }
-        std::println("\n-----------------");
+
+        std::println("-----------------");
+    }
+}
+
+TEST(ALSABackendTest, TestListEndPointsName) {
+    const mka::audio::ALSA alsa;
+
+    for (const auto endpoints = alsa.getEndPoints(); const auto& endpoint : endpoints) {
+        std::println("{}", endpoint.name);
     }
 }
