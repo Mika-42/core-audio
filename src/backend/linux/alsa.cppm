@@ -4,6 +4,7 @@
 module;
 #include <algorithm>
 #include <cstdint>
+#include <expected>
 #include <alsa/asoundlib.h>
 #include <optional>
 #include <string>
@@ -29,6 +30,26 @@ export namespace mka::audio {
         }
 
         [[nodiscard]] Result open_(EndpointConfig const &endpointCfg) override {
+            const bool needCapture = endpointCfg.direction != Direction::Output;
+            const bool needPlayback = endpointCfg.direction != Direction::Input;
+
+            if (needCapture) {
+                if (auto result = openStream(endpointCfg, SND_PCM_STREAM_CAPTURE, endpointCfg.inputChannels, captureHandle_, captureAccess_); !result) {
+                    return result;
+                }
+            }
+
+            if (needPlayback) {
+                if (auto result = openStream(endpointCfg, SND_PCM_STREAM_PLAYBACK, endpointCfg.outputChannels, playbackHandle_, playbackAccess_); !result) {
+                    if (captureHandle_ != nullptr) {
+                        snd_pcm_close(captureHandle_);
+                        captureHandle_ = nullptr;
+                    }
+                    return result;
+                }
+            }
+
+            config_ = endpointCfg;
             return {};
         }
 
@@ -41,11 +62,11 @@ export namespace mka::audio {
         }
 
         [[nodiscard]] Result close_() override {
+            closeHandles();
             return {};
         }
 
     private:
-
         static void collectCardEndpoints(const int cardIndex, std::vector<Endpoint> &endpoints) {
             const std::string ctlName = "hw:" + std::to_string(cardIndex);
 
@@ -73,8 +94,8 @@ export namespace mka::audio {
         }
 
         static std::optional<Endpoint> buildDeviceEndpoint(snd_ctl_t *ctl, const int cardIndex,
-                                                             const int deviceIndex,
-                                                             const std::string &cardName) {
+                                                           const int deviceIndex,
+                                                           const std::string &cardName) {
             const bool hasPlayback = pcmStreamExists(ctl, deviceIndex, SND_PCM_STREAM_PLAYBACK);
             const bool hasCapture = pcmStreamExists(ctl, deviceIndex, SND_PCM_STREAM_CAPTURE);
 
@@ -114,7 +135,7 @@ export namespace mka::audio {
         }
 
         static std::string getPcmDeviceName(snd_ctl_t *ctl, const int deviceIndex,
-                                             const snd_pcm_stream_t stream) {
+                                            const snd_pcm_stream_t stream) {
             snd_pcm_info_t *info = nullptr;
             snd_pcm_info_alloca(&info);
             snd_pcm_info_set_device(info, deviceIndex);
@@ -129,7 +150,7 @@ export namespace mka::audio {
         }
 
         static std::optional<StreamCapabilities> queryStreamCaps(const std::string &id,
-                                                                   const snd_pcm_stream_t stream) {
+                                                                 const snd_pcm_stream_t stream) {
             snd_pcm_t *pcm = nullptr;
             if (snd_pcm_open(&pcm, id.c_str(), stream, SND_PCM_NONBLOCK) < 0) {
                 return std::nullopt;
@@ -152,21 +173,21 @@ export namespace mka::audio {
             caps.minChannels = minChannels;
             caps.maxChannels = maxChannels;
 
-            for (const auto rate : supportedSampleRates) {
+            for (const auto rate: supportedSampleRates) {
                 if (snd_pcm_hw_params_test_rate(pcm, hwParams, rate, 0) == 0) {
                     caps.sampleRates.push_back(rate);
                 }
             }
 
-            for (const auto format : supportedFormats) {
+            for (const auto format: supportedFormats) {
                 if (snd_pcm_hw_params_test_format(pcm, hwParams, toALSAFormat(format)) == 0) {
                     caps.formats.push_back(format);
                 }
             }
 
-            for (const auto bufferSize : supportedBufferSizes) {
+            for (const auto bufferSize: supportedBufferSizes) {
                 if (const snd_pcm_uframes_t frames = bufferSize; snd_pcm_hw_params_test_period_size(
-                                                                      pcm, hwParams, frames, 0) == 0) {
+                                                                     pcm, hwParams, frames, 0) == 0) {
                     caps.bufferSizes.push_back(bufferSize);
                 }
             }
@@ -200,5 +221,89 @@ export namespace mka::audio {
 
             std::unreachable();
         }
+
+        static std::optional<snd_pcm_access_t> negotiateAccess(snd_pcm_t *pcm,
+                                                               snd_pcm_hw_params_t *params) noexcept {
+            if (snd_pcm_hw_params_set_access(pcm, params, SND_PCM_ACCESS_MMAP_NONINTERLEAVED) == 0) {
+                return SND_PCM_ACCESS_MMAP_NONINTERLEAVED;
+            }
+
+            if (snd_pcm_hw_params_set_access(pcm, params, SND_PCM_ACCESS_MMAP_INTERLEAVED) == 0) {
+                return SND_PCM_ACCESS_MMAP_INTERLEAVED;
+            }
+
+            return std::nullopt;
+        }
+
+        static Result openStream(const EndpointConfig &cfg, const snd_pcm_stream_t stream,
+                                 const std::uint32_t channels, snd_pcm_t *&outHandle,
+                                 snd_pcm_access_t &outAccess) noexcept {
+            snd_pcm_t *pcm = nullptr;
+            if (snd_pcm_open(&pcm, cfg.id.c_str(), stream, 0) < 0) {
+                return std::unexpected{ErrorType::EndpointUnavailable};
+            }
+
+            snd_pcm_hw_params_t *params = nullptr;
+            snd_pcm_hw_params_alloca(&params);
+
+            if (snd_pcm_hw_params_any(pcm, params) < 0) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::ConfigurationFailed};
+            }
+
+            const auto access = negotiateAccess(pcm, params);
+            if (!access) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::ConfigurationFailed};
+            }
+
+            if (snd_pcm_hw_params_set_format(pcm, params, toALSAFormat(cfg.format)) < 0) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::FormatNotSupported};
+            }
+
+            if (snd_pcm_hw_params_set_channels(pcm, params, channels) < 0) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::ChannelsNotSupported};
+            }
+
+            unsigned int rate = cfg.sampleRate;
+            if (snd_pcm_hw_params_set_rate_near(pcm, params, &rate, nullptr) < 0 || rate != cfg.sampleRate) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::SampleRateNotSupported};
+            }
+
+            snd_pcm_uframes_t period = cfg.bufferSize;
+            if (snd_pcm_hw_params_set_period_size_near(pcm, params, &period, nullptr) < 0 || period != cfg.bufferSize) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::BufferSizeNotSupported};
+            }
+
+            if (snd_pcm_hw_params(pcm, params) < 0) {
+                snd_pcm_close(pcm);
+                return std::unexpected{ErrorType::ConfigurationFailed};
+            }
+
+            outHandle = pcm;
+            outAccess = *access;
+            return {};
+        }
+
+        void closeHandles() noexcept {
+            if (captureHandle_ != nullptr) {
+                snd_pcm_close(captureHandle_);
+                captureHandle_ = nullptr;
+            }
+            if (playbackHandle_ != nullptr) {
+                snd_pcm_close(playbackHandle_);
+                playbackHandle_ = nullptr;
+            }
+        }
+
+        snd_pcm_t *captureHandle_ = nullptr;
+        snd_pcm_t *playbackHandle_ = nullptr;
+        snd_pcm_access_t captureAccess_{};
+        snd_pcm_access_t playbackAccess_{};
+        EndpointConfig config_{};
     };
 }

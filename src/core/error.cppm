@@ -7,7 +7,13 @@ export module mka.audio.error;
 
 export namespace mka::audio {
     enum class ErrorType {
-        InvalidState
+        InvalidState,
+        EndpointUnavailable,
+        FormatNotSupported,
+        ChannelsNotSupported,
+        SampleRateNotSupported,
+        BufferSizeNotSupported,
+        ConfigurationFailed,
     };
     using Result = std::expected<void, ErrorType>;
 }
