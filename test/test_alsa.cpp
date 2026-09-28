@@ -106,7 +106,7 @@ TEST(ALSABackendTest, TestOpenInvalidID) {
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::EndpointUnavailable);
 
-    alsa.close();
+    ASSERT_FALSE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenInvalidFmt) {
@@ -124,7 +124,7 @@ TEST(ALSABackendTest, TestOpenInvalidFmt) {
     auto ret = alsa.open(config);
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::FormatNotSupported);
-    alsa.close();
+    ASSERT_FALSE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenInvalidChannelCount) {
@@ -142,7 +142,7 @@ TEST(ALSABackendTest, TestOpenInvalidChannelCount) {
     auto ret = alsa.open(config);
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::ChannelsNotSupported);
-    alsa.close();
+    ASSERT_FALSE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenInvalidSamplerate) {
@@ -160,7 +160,7 @@ TEST(ALSABackendTest, TestOpenInvalidSamplerate) {
     auto ret = alsa.open(config);
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::SampleRateNotSupported);
-    alsa.close();
+    ASSERT_FALSE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenInvalidBuffSize) {
@@ -178,7 +178,7 @@ TEST(ALSABackendTest, TestOpenInvalidBuffSize) {
     auto ret = alsa.open(config);
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::BufferSizeNotSupported);
-    alsa.close();
+    ASSERT_FALSE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenPartialFailureCleansUpCapture) {
@@ -196,7 +196,7 @@ TEST(ALSABackendTest, TestOpenPartialFailureCleansUpCapture) {
     auto ret = alsa.open(config);
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::ChannelsNotSupported);
-    alsa.close();
+    ASSERT_FALSE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenTwiceFailsWithInvalidState) {
@@ -216,7 +216,7 @@ TEST(ALSABackendTest, TestOpenTwiceFailsWithInvalidState) {
     auto ret = alsa.open(config);
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::InvalidState);
-    alsa.close();
+    ASSERT_TRUE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestOpenSucceed) {
@@ -232,7 +232,7 @@ TEST(ALSABackendTest, TestOpenSucceed) {
     };
 
     auto ret = alsa.open(config);
-    alsa.close();
+    ASSERT_TRUE(alsa.close());
     ASSERT_TRUE(ret);
 }
 
@@ -548,7 +548,7 @@ TEST(ALSABackendTest, TestCloseReleasesDeviceForReopen) {
     // EndpointUnavailable plutôt que de réussir.
     auto ret = alsa.open(config);
     ASSERT_TRUE(ret);
-    alsa.close();
+    ASSERT_TRUE(alsa.close());
 }
 
 TEST(ALSABackendTest, TestFullLifecycleOpenStartStopClose) {
