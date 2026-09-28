@@ -21,7 +21,7 @@ ON
 
 option(MKA_BUILD_PIPEWIRE
 "Build the PipeWire backend"
-OFF
+ON
 )
 
 option(MKA_BUILD_JACK
@@ -113,7 +113,7 @@ FILE_SET CXX_MODULES
 BASE_DIRS
 src
 FILES
-src/backend/linux/pipewire.cppm
+        src/backend/linux/pipewire.cppm
 )
 
 target_link_libraries(mka-audio-pipewire
@@ -177,51 +177,43 @@ find_package(GTest REQUIRED)
 # --------------------------------------------------------
 # Core tests
 # --------------------------------------------------------
-
 add_executable(mka-core-audio-tests
         test/test_abstract_backend.cpp
-        test/test_alsa.cpp
-        test/test_jack.cpp
-        test/test_pipewire.cpp
 )
 
 target_link_libraries(mka-core-audio-tests
         PRIVATE
-        mka-audio-alsa
+        mka-core-audio
         GTest::gtest_main
 )
 
-#target_link_libraries(mka-core-audio-tests
-#        PRIVATE
-#        mka-audio-pipewire
-#        GTest::gtest_main
-#)
+if(MKA_BUILD_ALSA)
+    target_sources(mka-core-audio-tests PRIVATE test/test_alsa.cpp)
+    target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-alsa)
+endif()
 
-#target_link_libraries(mka-core-audio-tests
-#        PRIVATE
-#        mka-audio-jack
-#        GTest::gtest_main
-#)
+if(MKA_BUILD_PIPEWIRE)
+    target_sources(mka-core-audio-tests PRIVATE test/test_pipewire.cpp)
+    target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-pipewire)
+endif()
 
-target_link_libraries(mka-core-audio-tests
-PRIVATE
-mka-core-audio
-GTest::gtest_main
-)
+if(MKA_BUILD_JACK)
+    target_sources(mka-core-audio-tests PRIVATE test/test_jack.cpp)
+    target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-jack)
+endif()
 
 target_compile_features(
-mka-core-audio-tests
-PRIVATE
-cxx_std_26
+        mka-core-audio-tests
+        PRIVATE
+        cxx_std_26
 )
 
 include(GoogleTest)
 
 gtest_discover_tests(
-mka-core-audio-tests
-TEST_PREFIX "core."
+        mka-core-audio-tests
+        TEST_PREFIX "core."
 )
-
 # --------------------------------------------------------
 # ALSA tests
 # --------------------------------------------------------
