@@ -394,7 +394,7 @@ TEST(PipeWireBackendTest, TestOpenFailureLeavesStateClosedAllowingRetry) {
 
     auto ret = pw.open(goodConfig);
     ASSERT_TRUE(ret);
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 //--- Test Open : chemins nécessitant un endpoint réel -----------------------
@@ -403,7 +403,7 @@ TEST_F(PipeWireBackendHwTest, TestOpenSucceed) {
     mka::audio::PipeWire pw;
     auto ret = pw.open(makeOutputConfig());
     ASSERT_TRUE(ret);
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestOpenTwiceFailsWithInvalidState) {
@@ -414,7 +414,7 @@ TEST_F(PipeWireBackendHwTest, TestOpenTwiceFailsWithInvalidState) {
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::InvalidState);
 
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 //--- Test Start --------------------------------------------------------------
@@ -434,8 +434,8 @@ TEST_F(PipeWireBackendHwTest, TestStartSucceedsAfterOpen) {
     auto ret = pw.start();
     ASSERT_TRUE(ret);
 
-    pw.stop();
-    pw.close();
+    ASSERT_TRUE(pw.stop());
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestStartTwiceFailsInvalidState) {
@@ -447,8 +447,8 @@ TEST_F(PipeWireBackendHwTest, TestStartTwiceFailsInvalidState) {
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::InvalidState);
 
-    pw.stop();
-    pw.close();
+    ASSERT_TRUE(pw.stop());
+    ASSERT_TRUE(pw.close());
 }
 
 namespace {
@@ -479,8 +479,8 @@ TEST_F(PipeWireBackendHwTest, TestStartInvokesCallbackOnDifferentThread) {
     ASSERT_TRUE(g_callbackCalled.load());
     ASSERT_NE(g_callbackThreadId.load(), callingThreadId);
 
-    pw.stop();
-    pw.close();
+    ASSERT_TRUE(pw.stop());
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestSetProcessFunctionFailsWhileRunning) {
@@ -492,8 +492,8 @@ TEST_F(PipeWireBackendHwTest, TestSetProcessFunctionFailsWhileRunning) {
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::InvalidState);
 
-    pw.stop();
-    pw.close();
+    ASSERT_TRUE(pw.stop());
+    ASSERT_TRUE(pw.close());
 }
 
 TEST(PipeWireBackendTest, TestSetProcessFunctionAllowedWhenClosed) {
@@ -521,7 +521,7 @@ TEST_F(PipeWireBackendHwTest, TestStopWithoutStartAfterOpenFailsInvalidState) {
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::InvalidState);
 
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestStopSucceedsAfterStart) {
@@ -532,7 +532,7 @@ TEST_F(PipeWireBackendHwTest, TestStopSucceedsAfterStart) {
     auto ret = pw.stop();
     ASSERT_TRUE(ret);
 
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestStopTwiceFailsInvalidState) {
@@ -545,7 +545,7 @@ TEST_F(PipeWireBackendHwTest, TestStopTwiceFailsInvalidState) {
     ASSERT_FALSE(ret);
     ASSERT_EQ(ret.error(), mka::audio::ErrorType::InvalidState);
 
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestStopActuallyHaltsCallbackInvocations) {
@@ -567,7 +567,7 @@ TEST_F(PipeWireBackendHwTest, TestStopActuallyHaltsCallbackInvocations) {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     ASSERT_FALSE(g_callbackCalled.load());
 
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestStopAllowsReopenAndRestart) {
@@ -580,7 +580,7 @@ TEST_F(PipeWireBackendHwTest, TestStopAllowsReopenAndRestart) {
     ASSERT_TRUE(ret);
     ASSERT_TRUE(pw.stop());
 
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 //--- Test Close -----------------------------------------------------------
@@ -636,7 +636,7 @@ TEST_F(PipeWireBackendHwTest, TestCloseReleasesEndpointForReopen) {
     // fuiter. On vérifie ici que la réouverture réussit bien.
     auto ret = pw.open(makeOutputConfig());
     ASSERT_TRUE(ret);
-    pw.close();
+    ASSERT_TRUE(pw.close());
 }
 
 TEST_F(PipeWireBackendHwTest, TestFullLifecycleOpenStartStopClose) {
@@ -654,9 +654,8 @@ namespace {
     double g_sinePhaseIncrement = 0.0;
 
     void sineCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
-        constexpr float amplitude = 0.2f;
-
         for (std::uint32_t i = 0; i < ctx.frames; ++i) {
+            constexpr float amplitude = 0.2f;
             const auto sample = static_cast<float>(std::sin(g_sinePhase) * amplitude);
 
             for (std::uint32_t ch = 0; ch < ctx.output.count; ++ch) {

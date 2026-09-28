@@ -26,7 +26,7 @@ ON
 
 option(MKA_BUILD_JACK
 "Build the JACK backend"
-OFF
+ON
 )
 
 
