@@ -1,30 +1,3 @@
-//
-// mka.audio.pipewire — Backend PipeWire (implémentation KISS/YAGNI)
-//
-// Choix de conception volontairement simples :
-//  - Un seul pw_stream par instance (Input OU Output). Direction::Duplex
-//    n'est pas géré ici (nécessiterait deux streams synchronisés) et
-//    renvoie ErrorType::ConfigurationFailed tant que le besoin n'est pas là.
-//  - Le stream négocie toujours SPA_AUDIO_FORMAT_F32P : c'est le format
-//    interne du graphe PipeWire, cohérent avec InputBuffer/OutputBuffer
-//    qui exposent des float* quel que soit EndpointConfig::format.
-//    EndpointConfig::format n'est donc accepté ici que s'il vaut
-//    Format::Float32 — les autres valeurs, bien que présentes dans
-//    mka.audio.constants::supportedFormats (liste globale, pas garantie
-//    par backend), sont rejetées avec FormatNotSupported.
-//  - open_() vérifie qu'un id non vide correspond à un endpoint existant
-//    (via un scan getEndPoints_()) avant de tenter la connexion, pour
-//    renvoyer ErrorType::EndpointUnavailable de façon synchrone et fiable.
-//  - start_() bloque le thread appelant via pw_thread_loop_lock/wait,
-//    réveillé par le callback state_changed (cf. contrat "peut bloquer").
-//  - stop_() demande l'arrêt du thread audio via pw_thread_loop_stop.
-//  - getEndPoints_() ouvre une connexion PipeWire temporaire, scanne le
-//    registre, et renvoie une liste vide en cas d'échec (jamais d'exception).
-//    Les capacités par endpoint (StreamCapabilities) sont renseignées avec
-//    les valeurs globales de mka.audio.constants : une interrogation fine
-//    des formats réellement supportés par chaque noeud (SPA_PARAM_EnumFormat)
-//    n'est pas implémentée ici (YAGNI — à ajouter si un besoin précis émerge).
-//
 module;
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -174,11 +147,6 @@ namespace mka::audio {
         if (!contains(supportedBufferSizes, endpointCfg.bufferSize))
             return std::unexpected{ ErrorType::BufferSizeNotSupported };
 
-        // supportedFormats (mka.audio.constants) liste tous les formats
-        // envisageables *tous backends confondus* : ce n'est pas une
-        // garantie que ce backend PipeWire les gère. Ce backend ne négocie
-        // jamais que SPA_AUDIO_FORMAT_F32P (cf. note en tête de fichier),
-        // donc Float32 est le seul format réellement accepté ici.
         if (endpointCfg.format != Format::Float32)
             return std::unexpected{ ErrorType::FormatNotSupported };
 
@@ -188,11 +156,6 @@ namespace mka::audio {
         if (channels == 0)
             return std::unexpected{ ErrorType::ChannelsNotSupported };
 
-        // Un id explicite doit correspondre à un endpoint réellement
-        // annoncé par PipeWire, avec la capacité demandée (input/output) ;
-        // sinon PW_STREAM_FLAG_AUTOCONNECT échouerait silencieusement plus
-        // tard, de façon asynchrone, au lieu de remonter une erreur claire
-        // dès open(). Un id vide signifie "endpoint par défaut".
         if (!endpointCfg.id.empty()) {
             const auto endpoints = getEndPoints_();
             const auto it = std::ranges::find_if(endpoints, [&](Endpoint const &e) {
