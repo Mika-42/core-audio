@@ -6,52 +6,54 @@
 
 import mka.audio.backend;
 
-class BackendImpl : public mka::audio::Backend {
-public:
-    bool failOpen = false;
-    bool failClose = false;
-    bool failStart = false;
-    bool failStop = false;
+namespace {
+    class BackendImpl : public mka::audio::Backend {
+    public:
+        bool failOpen = false;
+        bool failClose = false;
+        bool failStart = false;
+        bool failStop = false;
 
-    BackendImpl() = default;
-    ~BackendImpl() override = default;
+        BackendImpl() = default;
+        ~BackendImpl() override = default;
 
-protected:
-    std::vector<mka::audio::Endpoint>
-    getEndPoints_() const noexcept override {
-        return {};
-    }
+    protected:
+        std::vector<mka::audio::Endpoint>
+        getEndPoints_() const noexcept override {
+            return {};
+        }
 
-    mka::audio::Result open_(
-        mka::audio::EndpointConfig const&
-    ) noexcept override {
-        if (failOpen)
-            return std::unexpected(mka::audio::ErrorType::InvalidState);
+        mka::audio::Result open_(
+            mka::audio::EndpointConfig const&
+        ) noexcept override {
+            if (failOpen)
+                return std::unexpected(mka::audio::ErrorType::InvalidState);
 
-        return {};
-    }
+            return {};
+        }
 
-    mka::audio::Result close_() noexcept override {
-        if (failClose)
-            return std::unexpected(mka::audio::ErrorType::InvalidState);
+        mka::audio::Result close_() noexcept override {
+            if (failClose)
+                return std::unexpected(mka::audio::ErrorType::InvalidState);
 
-        return {};
-    }
+            return {};
+        }
 
-    mka::audio::Result start_() noexcept override {
-        if (failStart)
-            return std::unexpected(mka::audio::ErrorType::InvalidState);
+        mka::audio::Result start_() noexcept override {
+            if (failStart)
+                return std::unexpected(mka::audio::ErrorType::InvalidState);
 
-        return {};
-    }
+            return {};
+        }
 
-    mka::audio::Result stop_() noexcept override {
-        if (failStop)
-            return std::unexpected(mka::audio::ErrorType::InvalidState);
+        mka::audio::Result stop_() noexcept override {
+            if (failStop)
+                return std::unexpected(mka::audio::ErrorType::InvalidState);
 
-        return {};
-    }
-};
+            return {};
+        }
+    };
+}
 
 
 enum class BackendOperation {

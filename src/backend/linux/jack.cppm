@@ -15,7 +15,7 @@ module;
 #include <string_view>
 #include <vector>
 
-export module mka.audio.jack;
+export module mka.audio.backend.jack;
 
 import mka.audio.backend;
 import mka.audio.error;
@@ -29,8 +29,6 @@ namespace mka::audio {
         using ClientPtr = std::unique_ptr<jack_client_t, decltype(&jack_client_close)>;
         using PortList = std::unique_ptr<const char *, decltype(&jack_free)>;
 
-        // Noms complets ("client:port") des ports audio du client `clientName`
-        // possédant tous les `flags` demandés.
         std::vector<std::string> portsOf(jack_client_t *client, const std::string_view clientName,
                                          const unsigned long flags) {
             std::vector<std::string> result;
@@ -108,6 +106,10 @@ namespace mka::audio {
             self->outBuffers_[i] = static_cast<float *>(jack_port_get_buffer(self->outPorts_[i], nframes));
         }
 
+        for (float *out : self->outBuffers_) {
+            std::memset(out, 0, nframes * sizeof(float));
+        }
+
         if (self->callback) {
             const AudioProcessContext ctx{
                 .input = { self->inBuffers_.data(), static_cast<std::uint32_t>(self->inBuffers_.size()) },
@@ -115,12 +117,8 @@ namespace mka::audio {
                 .frames = nframes
             };
             self->callback(self->userData, ctx);
-        } else {
-            // Les buffers de sortie JACK ne sont pas garantis nuls.
-            for (float *out : self->outBuffers_) {
-                std::memset(out, 0, nframes * sizeof(float));
-            }
         }
+
         return 0;
     }
 

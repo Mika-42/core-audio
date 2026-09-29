@@ -14,7 +14,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module mka.audio.alsa;
+export module mka.audio.backend.alsa;
 export import mka.audio.backend;
 import mka.audio.constants;
 import mka.audio.process;
@@ -52,14 +52,14 @@ export namespace mka::audio {
 
             if (needCapture) {
                 if (auto result = openStream(endpointCfg, SND_PCM_STREAM_CAPTURE,
-                                              endpointCfg.inputChannels, captureHandle_, captureAccess_); !result) {
+                                             endpointCfg.inputChannels, captureHandle_, captureAccess_); !result) {
                     return result;
                 }
             }
 
             if (needPlayback) {
                 if (auto result = openStream(endpointCfg, SND_PCM_STREAM_PLAYBACK,
-                                              endpointCfg.outputChannels, playbackHandle_, playbackAccess_); !result) {
+                                             endpointCfg.outputChannels, playbackHandle_, playbackAccess_); !result) {
                     if (captureHandle_ != nullptr) {
                         snd_pcm_close(captureHandle_);
                         captureHandle_ = nullptr;
@@ -158,8 +158,8 @@ export namespace mka::audio {
         }
 
         static std::optional<Endpoint> buildDeviceEndpoint(snd_ctl_t *ctl, const int cardIndex,
-                                                             const int deviceIndex,
-                                                             const std::string &cardName) {
+                                                           const int deviceIndex,
+                                                           const std::string &cardName) {
             const bool hasPlayback = pcmStreamExists(ctl, deviceIndex, SND_PCM_STREAM_PLAYBACK);
             const bool hasCapture = pcmStreamExists(ctl, deviceIndex, SND_PCM_STREAM_CAPTURE);
 
@@ -199,7 +199,7 @@ export namespace mka::audio {
         }
 
         static std::string getPcmDeviceName(snd_ctl_t *ctl, const int deviceIndex,
-                                             const snd_pcm_stream_t stream) {
+                                            const snd_pcm_stream_t stream) {
             snd_pcm_info_t *info = nullptr;
             snd_pcm_info_alloca(&info);
             snd_pcm_info_set_device(info, deviceIndex);
@@ -214,7 +214,7 @@ export namespace mka::audio {
         }
 
         static std::optional<StreamCapabilities> queryStreamCaps(const std::string &id,
-                                                                   const snd_pcm_stream_t stream) {
+                                                                 const snd_pcm_stream_t stream) {
             snd_pcm_t *pcm = nullptr;
             if (snd_pcm_open(&pcm, id.c_str(), stream, SND_PCM_NONBLOCK) < 0) {
                 return std::nullopt;
@@ -237,21 +237,21 @@ export namespace mka::audio {
             caps.minChannels = minChannels;
             caps.maxChannels = maxChannels;
 
-            for (const auto rate : supportedSampleRates) {
+            for (const auto rate: supportedSampleRates) {
                 if (snd_pcm_hw_params_test_rate(pcm, hwParams, rate, 0) == 0) {
                     caps.sampleRates.push_back(rate);
                 }
             }
 
-            for (const auto format : supportedFormats) {
+            for (const auto format: supportedFormats) {
                 if (snd_pcm_hw_params_test_format(pcm, hwParams, toALSAFormat(format)) == 0) {
                     caps.formats.push_back(format);
                 }
             }
 
-            for (const auto bufferSize : supportedBufferSizes) {
+            for (const auto bufferSize: supportedBufferSizes) {
                 if (const snd_pcm_uframes_t frames = bufferSize; snd_pcm_hw_params_test_period_size(
-                                                                      pcm, hwParams, frames, 0) == 0) {
+                                                                     pcm, hwParams, frames, 0) == 0) {
                     caps.bufferSizes.push_back(bufferSize);
                 }
             }
@@ -268,7 +268,7 @@ export namespace mka::audio {
         // --- open_ ---------------------------------------------------------------
 
         static std::optional<snd_pcm_access_t> negotiateAccess(snd_pcm_t *pcm,
-                                                                 snd_pcm_hw_params_t *params) noexcept {
+                                                               snd_pcm_hw_params_t *params) noexcept {
             if (snd_pcm_hw_params_set_access(pcm, params, SND_PCM_ACCESS_MMAP_NONINTERLEAVED) == 0) {
                 return SND_PCM_ACCESS_MMAP_NONINTERLEAVED;
             }
@@ -281,8 +281,8 @@ export namespace mka::audio {
         }
 
         static Result openStream(const EndpointConfig &cfg, const snd_pcm_stream_t stream,
-                                  const std::uint32_t channels, snd_pcm_t *&outHandle,
-                                  snd_pcm_access_t &outAccess) noexcept {
+                                 const std::uint32_t channels, snd_pcm_t *&outHandle,
+                                 snd_pcm_access_t &outAccess) noexcept {
             snd_pcm_t *pcm = nullptr;
             if (snd_pcm_open(&pcm, cfg.id.c_str(), stream, 0) < 0) {
                 return std::unexpected{ErrorType::EndpointUnavailable};
@@ -341,7 +341,7 @@ export namespace mka::audio {
         }
 
         void allocateScratchBuffers(const EndpointConfig &cfg, const bool needCapture,
-                                     const bool needPlayback) {
+                                    const bool needPlayback) {
             if (needCapture) {
                 inputScratch_.assign(cfg.inputChannels, std::vector<float>(cfg.bufferSize));
                 inputChannelPtrs_.resize(cfg.inputChannels);
@@ -422,7 +422,7 @@ export namespace mka::audio {
         }
 
         static snd_pcm_uframes_t mmapReadToScratch(snd_pcm_t *pcm, const Format format,
-                                                     std::vector<std::vector<float> > &scratch) noexcept {
+                                                   std::vector<std::vector<float> > &scratch) noexcept {
             const snd_pcm_channel_area_t *areas = nullptr;
             snd_pcm_uframes_t offset = 0;
             snd_pcm_uframes_t frames = scratch.empty() ? 0 : scratch[0].size();
@@ -449,8 +449,8 @@ export namespace mka::audio {
         }
 
         static void mmapWriteFromScratch(snd_pcm_t *pcm, const Format format,
-                                          const std::vector<std::vector<float> > &scratch,
-                                          const snd_pcm_uframes_t frames) noexcept {
+                                         const std::vector<std::vector<float> > &scratch,
+                                         const snd_pcm_uframes_t frames) noexcept {
             const snd_pcm_channel_area_t *areas = nullptr;
             snd_pcm_uframes_t offset = 0;
             snd_pcm_uframes_t avail = frames;
@@ -519,6 +519,12 @@ export namespace mka::audio {
                 if (playbackHandle_ != nullptr) {
                     ctx.output.channels = outputChannelPtrs_.data();
                     ctx.output.count = static_cast<std::uint32_t>(outputChannelPtrs_.size());
+                }
+
+                if (playbackHandle_ != nullptr) {
+                    for (auto &ch: outputScratch_) {
+                        std::ranges::fill(ch, 0.0f);
+                    }
                 }
 
                 if (callback != nullptr) {

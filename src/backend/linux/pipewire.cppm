@@ -10,7 +10,7 @@ module;
 #include <string>
 #include <vector>
 
-export module mka.audio.pipewire;
+export module mka.audio.backend.pipewire;
 
 import mka.audio.backend;
 import mka.audio.error;
@@ -19,38 +19,46 @@ import mka.audio.constants;
 import mka.audio.process;
 
 namespace mka::audio {
-
     export class PipeWire final : public Backend {
-        public:
-            PipeWire() noexcept {
-                pw_init(nullptr, nullptr);
-            }
+    public:
+        PipeWire() noexcept {
+            pw_init(nullptr, nullptr);
+        }
 
-            ~PipeWire() override {
-                teardownStream();
-                pw_deinit();
-            }
+        ~PipeWire() override {
+            teardownStream();
+            pw_deinit();
+        }
 
-        protected:
-            [[nodiscard]] std::vector<Endpoint> getEndPoints_() const override;
-            [[nodiscard]] Result open_(EndpointConfig const &endpointCfg) override;
-            [[nodiscard]] Result start_() override;
-            [[nodiscard]] Result stop_() override;
-            [[nodiscard]] Result close_() override;
+    protected:
+        [[nodiscard]] std::vector<Endpoint> getEndPoints_() const override;
 
-        private:
-            static void onStateChanged(void *data, pw_stream_state old, pw_stream_state state, const char *error);
-            static void onProcess(void *data);
+        [[nodiscard]] Result open_(EndpointConfig const &endpointCfg) override;
 
-            void teardownStream() noexcept;
+        [[nodiscard]] Result start_() override;
 
-            pw_thread_loop *loop_ = nullptr;
-            pw_stream *stream_ = nullptr;
+        [[nodiscard]] Result stop_() override;
 
-            Direction direction_ = Direction::Output;
+        [[nodiscard]] Result close_() override;
 
-            std::atomic<bool> ready_ = false;
-            std::atomic<bool> failed_ = false;
+    private:
+        static void onStateChanged(void *data, pw_stream_state old, pw_stream_state state, const char *error);
+
+        static void onProcess(void *data);
+
+        void teardownStream() noexcept;
+
+        pw_thread_loop *loop_ = nullptr;
+        pw_stream *stream_ = nullptr;
+
+        Direction direction_ = Direction::Output;
+        std::uint32_t channels_ = 0;
+
+        // Préalloués dans open_ : onProcess ne doit jamais allouer.
+        std::vector<const float *> inChannels_;
+        std::vector<float *> outChannels_;
+        std::atomic<bool> ready_ = false;
+        std::atomic<bool> failed_ = false;
     };
 
     // --- Callbacks stream -------------------------------------------------
@@ -79,49 +87,76 @@ namespace mka::audio {
 
         spa_buffer *buf = b->buffer;
 
-        static thread_local std::vector<const float *> inChannels;
-        static thread_local std::vector<float *> outChannels;
-
-        std::uint32_t frames = 0;
+        // F32P = un plan par canal : on attend exactement channels_ plans.
+        const bool layoutOk = buf->n_datas == self->channels_;
 
         if (self->direction_ == Direction::Input) {
-            inChannels.resize(buf->n_datas);
-            for (std::uint32_t i = 0; i < buf->n_datas; ++i) {
-                auto &d = buf->datas[i];
-                const auto *base = static_cast<const float *>(d.data);
-                if (d.chunk) {
-                    // chunk->offset est en octets et peut être non nul selon
-                    // le plugin source (ex. certains backends ALSA/mmap) :
-                    // l'ignorer revient à lire au mauvais endroit du buffer.
-                    base += d.chunk->offset / sizeof(float);
-                    frames = d.chunk->size / sizeof(float);
+            std::uint32_t frames = 0;
+            bool ok = layoutOk;
+
+            for (std::uint32_t i = 0; ok && i < self->channels_; ++i) {
+                const spa_data &d = buf->datas[i];
+                if (!d.data || !d.chunk) {
+                    ok = false;
+                    break;
                 }
-                inChannels[i] = base;
+
+                const std::uint32_t off = std::min(d.chunk->offset, d.maxsize);
+                const std::uint32_t size = std::min(d.chunk->size, d.maxsize - off);
+
+                self->inChannels_[i] = reinterpret_cast<const float *>(
+                    static_cast<const std::byte *>(d.data) + off);
+                frames = size / sizeof(float);
             }
 
-            const AudioProcessContext ctx{
-                .input = { inChannels.data(), static_cast<std::uint32_t>(inChannels.size()) },
-                .output = { nullptr, 0 },
-                .frames = frames
-            };
-            if (self->callback) self->callback(self->userData, ctx);
+            if (ok && frames > 0 && self->callback) {
+                const AudioProcessContext ctx{
+                    .input = {self->inChannels_.data(), self->channels_},
+                    .output = {nullptr, 0},
+                    .frames = frames
+                };
+                self->callback(self->userData, ctx);
+            }
         } else {
-            outChannels.resize(buf->n_datas);
-            for (std::uint32_t i = 0; i < buf->n_datas; ++i) {
-                auto &d = buf->datas[i];
-                outChannels[i] = static_cast<float *>(d.data);
-                frames = d.maxsize / sizeof(float);
+            std::uint32_t frames = 0;
+            bool ok = layoutOk;
+
+            if (ok) {
+                frames = UINT32_MAX;
+                for (std::uint32_t i = 0; i < self->channels_; ++i) {
+                    const spa_data &d = buf->datas[i];
+                    if (!d.data) {
+                        ok = false;
+                        break;
+                    }
+                    frames = std::min<std::uint32_t>(frames, d.maxsize / sizeof(float));
+                    self->outChannels_[i] = static_cast<float *>(d.data);
+                }
+                // Quantum demandé par le graphe (0 = pas d'information).
+                if (ok && b->requested != 0) {
+                    frames = std::min<std::uint32_t>(frames, static_cast<std::uint32_t>(b->requested));
+                }
+            }
+            if (!ok) frames = 0;
+
+            if (frames > 0) {
+                // B7 : sortie à zéro avant le callback.
+                for (std::uint32_t i = 0; i < self->channels_; ++i) {
+                    std::memset(self->outChannels_[i], 0, frames * sizeof(float));
+                }
+
+                if (self->callback) {
+                    const AudioProcessContext ctx{
+                        .input = {nullptr, 0},
+                        .output = {self->outChannels_.data(), self->channels_},
+                        .frames = frames
+                    };
+                    self->callback(self->userData, ctx);
+                }
             }
 
-            const AudioProcessContext ctx{
-                .input = { nullptr, 0 },
-                .output = { outChannels.data(), static_cast<std::uint32_t>(outChannels.size()) },
-                .frames = frames
-            };
-            if (self->callback) self->callback(self->userData, ctx);
-
             for (std::uint32_t i = 0; i < buf->n_datas; ++i) {
-                auto &d = buf->datas[i];
+                spa_data &d = buf->datas[i];
                 if (!d.chunk) continue;
                 d.chunk->offset = 0;
                 d.chunk->stride = sizeof(float);
@@ -136,25 +171,29 @@ namespace mka::audio {
 
     Result PipeWire::open_(EndpointConfig const &endpointCfg) {
         if (endpointCfg.direction == Direction::Duplex) {
-            return std::unexpected{ ErrorType::ConfigurationFailed };
+            return std::unexpected{ErrorType::ConfigurationFailed};
         }
 
         const auto contains = [](auto const &arr, auto value) {
             return std::find(arr.begin(), arr.end(), value) != arr.end();
         };
         if (!contains(supportedSampleRates, endpointCfg.sampleRate))
-            return std::unexpected{ ErrorType::SampleRateNotSupported };
+            return std::unexpected{ErrorType::SampleRateNotSupported};
         if (!contains(supportedBufferSizes, endpointCfg.bufferSize))
-            return std::unexpected{ ErrorType::BufferSizeNotSupported };
+            return std::unexpected{ErrorType::BufferSizeNotSupported};
 
         if (endpointCfg.format != Format::Float32)
-            return std::unexpected{ ErrorType::FormatNotSupported };
+            return std::unexpected{ErrorType::FormatNotSupported};
 
         const std::uint32_t channels = endpointCfg.direction == Direction::Input
-            ? endpointCfg.inputChannels
-            : endpointCfg.outputChannels;
+                                           ? endpointCfg.inputChannels
+                                           : endpointCfg.outputChannels;
         if (channels == 0)
-            return std::unexpected{ ErrorType::ChannelsNotSupported };
+            return std::unexpected{ErrorType::ChannelsNotSupported};
+
+        channels_ = channels;
+        inChannels_.assign(channels, nullptr);
+        outChannels_.assign(channels, nullptr);
 
         if (!endpointCfg.id.empty()) {
             const auto endpoints = getEndPoints_();
@@ -162,28 +201,30 @@ namespace mka::audio {
                 return e.id == endpointCfg.id;
             });
             const bool hasCapability = it != endpoints.end() && (
-                endpointCfg.direction == Direction::Input ? it->input.has_value() : it->output.has_value());
+                                           endpointCfg.direction == Direction::Input
+                                               ? it->input.has_value()
+                                               : it->output.has_value());
             if (!hasCapability)
-                return std::unexpected{ ErrorType::EndpointUnavailable };
+                return std::unexpected{ErrorType::EndpointUnavailable};
         }
 
         direction_ = endpointCfg.direction;
 
         loop_ = pw_thread_loop_new("mka-audio-pipewire", nullptr);
-        if (!loop_) return std::unexpected{ ErrorType::ConfigurationFailed };
+        if (!loop_) return std::unexpected{ErrorType::ConfigurationFailed};
 
         pw_properties *props = pw_properties_new(
             PW_KEY_MEDIA_TYPE, "Audio",
             PW_KEY_MEDIA_CATEGORY, direction_ == Direction::Input ? "Capture" : "Playback",
             PW_KEY_MEDIA_ROLE, "Production",
             PW_KEY_NODE_LATENCY,
-                (std::to_string(endpointCfg.bufferSize) + "/" + std::to_string(endpointCfg.sampleRate)).c_str(),
+            (std::to_string(endpointCfg.bufferSize) + "/" + std::to_string(endpointCfg.sampleRate)).c_str(),
             nullptr);
 
         if (!props) {
             pw_thread_loop_destroy(loop_);
             loop_ = nullptr;
-            return std::unexpected{ ErrorType::ConfigurationFailed };
+            return std::unexpected{ErrorType::ConfigurationFailed};
         }
 
         if (!endpointCfg.id.empty()) {
@@ -208,7 +249,7 @@ namespace mka::audio {
         if (!stream_) {
             pw_thread_loop_destroy(loop_);
             loop_ = nullptr;
-            return std::unexpected{ ErrorType::EndpointUnavailable };
+            return std::unexpected{ErrorType::EndpointUnavailable};
         }
 
         std::uint8_t podBuffer[1024];
@@ -232,7 +273,7 @@ namespace mka::audio {
             stream_ = nullptr;
             pw_thread_loop_destroy(loop_);
             loop_ = nullptr;
-            return std::unexpected{ ErrorType::ConfigurationFailed };
+            return std::unexpected{ErrorType::ConfigurationFailed};
         }
 
         return {};
@@ -258,7 +299,7 @@ namespace mka::audio {
         while (!ready_.load(std::memory_order_acquire) &&
                !failed_.load(std::memory_order_acquire)) {
             pw_thread_loop_wait(loop_);
-               }
+        }
 
         pw_thread_loop_unlock(loop_);
 
@@ -309,7 +350,7 @@ namespace mka::audio {
         };
 
         void onRegistryGlobal(void *data, std::uint32_t id, std::uint32_t /*permissions*/,
-                               const char *type, std::uint32_t /*version*/, const spa_dict *props) {
+                              const char *type, std::uint32_t /*version*/, const spa_dict *props) {
             auto *ctx = static_cast<ScanContext *>(data);
             if (!props || std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
 
@@ -332,9 +373,9 @@ namespace mka::audio {
             StreamCapabilities caps{
                 .minChannels = 1,
                 .maxChannels = 2,
-                .sampleRates = { supportedSampleRates.begin(), supportedSampleRates.end() },
-                .formats = { supportedFormats.begin(), supportedFormats.end() },
-                .bufferSizes = { supportedBufferSizes.begin(), supportedBufferSizes.end() },
+                .sampleRates = {supportedSampleRates.begin(), supportedSampleRates.end()},
+                .formats = {supportedFormats.begin(), supportedFormats.end()},
+                .bufferSizes = {supportedBufferSizes.begin(), supportedBufferSizes.end()},
             };
 
             if (isSource) ep.input = caps;
@@ -415,5 +456,4 @@ namespace mka::audio {
             return {};
         }
     }
-
 }
