@@ -92,7 +92,7 @@ namespace mka::audio {
                     .output = { self->outPtrs_.data(), self->channels_ },
                     .frames = static_cast<std::uint32_t>(frames)
                 };
-                self->callback(ctx);
+                self->callback(self->userData, ctx);
             } else {
                 for (auto &ch : self->scratch_) std::fill_n(ch.data(), frames, 0.0f);
             }
@@ -144,7 +144,7 @@ namespace mka::audio {
                         .output = { nullptr, 0 },
                         .frames = static_cast<std::uint32_t>(frames)
                     };
-                    self->callback(ctx);
+                    self->callback(self->userData, ctx);
                 }
 
                 offset += frames;

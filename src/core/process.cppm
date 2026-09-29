@@ -22,5 +22,5 @@ export namespace mka::audio {
         std::uint32_t frames;
     };
 
-    using ProcessFunction = void (*)(const AudioProcessContext&) noexcept;
+    using ProcessFunction = void (*)(void* user, const AudioProcessContext&) noexcept;
 }

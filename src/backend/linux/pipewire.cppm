@@ -104,7 +104,7 @@ namespace mka::audio {
                 .output = { nullptr, 0 },
                 .frames = frames
             };
-            if (self->callback) self->callback(ctx);
+            if (self->callback) self->callback(self->userData, ctx);
         } else {
             outChannels.resize(buf->n_datas);
             for (std::uint32_t i = 0; i < buf->n_datas; ++i) {
@@ -118,7 +118,7 @@ namespace mka::audio {
                 .output = { outChannels.data(), static_cast<std::uint32_t>(outChannels.size()) },
                 .frames = frames
             };
-            if (self->callback) self->callback(ctx);
+            if (self->callback) self->callback(self->userData, ctx);
 
             for (std::uint32_t i = 0; i < buf->n_datas; ++i) {
                 auto &d = buf->datas[i];
@@ -190,7 +190,7 @@ namespace mka::audio {
             pw_properties_set(props, PW_KEY_TARGET_OBJECT, endpointCfg.id.c_str());
         }
 
-        static const pw_stream_events streamEvents = {
+        static constexpr pw_stream_events streamEvents = {
             .version = PW_VERSION_STREAM_EVENTS,
             .state_changed = &PipeWire::onStateChanged,
             .process = &PipeWire::onProcess,

@@ -1,26 +1,7 @@
 //
 // mka.audio.jack — Backend JACK (implémentation KISS/YAGNI)
 //
-// Particularités de JACK qui guident la conception :
-//  - Le serveur impose sample rate et taille de buffer, et les ports sont
-//    toujours du float32 mono non entrelacé : ça correspond exactement à
-//    InputBuffer/OutputBuffer. Le backend ne négocie donc rien, il *valide*
-//    que EndpointConfig correspond au serveur (SampleRateNotSupported /
-//    BufferSizeNotSupported sinon) et n'accepte que Format::Float32.
-//  - Un JACK client est naturellement full-duplex : Direction::Duplex est
-//    géré, avec un seul callback recevant entrées et sorties ensemble.
-//  - Un "endpoint" est un client JACK du graphe (ex. "system"). Ses ports de
-//    sortie sont nos sources (capacité input), ses ports d'entrée nos
-//    destinations (capacité output). Id = nom du client, sans le ":port".
-//  - Id vide : le client enregistre ses ports sans les connecter (routage
-//    laissé à l'utilisateur, ex. qjackctl / pw-jack).
-//  - open_ enregistre les ports ; start_ = jack_activate + connexions (les
-//    connexions étant retirées par jack_deactivate, elles sont refaites à
-//    chaque start) ; stop_ = jack_deactivate ; close_ = jack_client_close.
-//  - Le serveur n'est jamais lancé automatiquement (JackNoStartServer).
-//  - Non géré (YAGNI) : callback de shutdown serveur, xruns, changement
-//    dynamique de rate/buffer.
-//
+
 module;
 #include <jack/jack.h>
 #include <algorithm>
@@ -133,7 +114,7 @@ namespace mka::audio {
                 .output = { self->outBuffers_.data(), static_cast<std::uint32_t>(self->outBuffers_.size()) },
                 .frames = nframes
             };
-            self->callback(ctx);
+            self->callback(self->userData, ctx);
         } else {
             // Les buffers de sortie JACK ne sont pas garantis nuls.
             for (float *out : self->outBuffers_) {
