@@ -6,7 +6,7 @@
 #include <print>
 #include <cmath>
 
-import mka.audio.alsa;
+import mka.audio.backend.alsa;
 import mka.audio.process;
 
 static const char* fmtToStr(mka::audio::Format format) {

@@ -7,7 +7,7 @@ module;
 #include <string>
 #include <vector>
 
-export module mka.audio.pulseaudio;
+export module mka.audio.backend.pulseaudio;
 
 import mka.audio.backend;
 import mka.audio.error;
@@ -86,15 +86,15 @@ namespace mka::audio {
             if (pa_stream_begin_write(s, &data, &nbytes) < 0 || !data) return;
 
             const std::size_t frames = nbytes / bytesPerFrame;
-            if (self->callback) {
+            for (auto &ch : self->scratch_) std::fill_n(ch.data(), frames, 0.0f);
+
+                        if (self->callback) {
                 const AudioProcessContext ctx{
                     .input = { nullptr, 0 },
                     .output = { self->outPtrs_.data(), self->channels_ },
                     .frames = static_cast<std::uint32_t>(frames)
                 };
                 self->callback(self->userData, ctx);
-            } else {
-                for (auto &ch : self->scratch_) std::fill_n(ch.data(), frames, 0.0f);
             }
 
             auto *out = static_cast<float *>(data);

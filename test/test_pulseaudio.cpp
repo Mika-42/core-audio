@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-import mka.audio.pulseaudio;
+import mka.audio.backend.pulseaudio;
 import mka.audio.process;
 import mka.audio.error;
 import mka.audio.endpoint;

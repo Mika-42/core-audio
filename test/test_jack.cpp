@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-import mka.audio.jack;
+import mka.audio.backend.jack;
 import mka.audio.process;
 import mka.audio.error;
 import mka.audio.endpoint;

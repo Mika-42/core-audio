@@ -13,7 +13,7 @@
 #include <string_view>
 #include <thread>
 
-import mka.audio.pipewire;
+import mka.audio.backend.pipewire;
 import mka.audio.process;
 import mka.audio.error;
 import mka.audio.endpoint;
