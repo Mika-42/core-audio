@@ -951,7 +951,7 @@ namespace {
 
 // Désactivé par défaut : joue réellement du son. À activer manuellement avec
 // --gtest_filter=*DISABLED_TestPlaySineWave* --gtest_also_run_disabled_tests
-TEST(PulseAudioBackendTest, TestPlaySineWave) {
+TEST(PulseAudioBackendTest, DISABLED_TestPlaySineWave) {
     const auto out = discoverOutput();
     ASSERT_TRUE(out.available) << "aucun endpoint de sortie PulseAudio";
     std::println("output device: {}", out.id);
@@ -1049,7 +1049,7 @@ namespace {
 
 // Désactivé par défaut : enregistre depuis un endpoint source et rejoue sur
 // un endpoint destination. À activer manuellement.
-TEST(PulseAudioBackendTest, TestRecordAndPlayback) {
+TEST(PulseAudioBackendTest, DISABLED_TestRecordAndPlayback) {
     const auto in = discoverInput();
     const auto out = discoverOutput();
     ASSERT_TRUE(in.available) << "aucun endpoint d'entrée PulseAudio";
