@@ -240,7 +240,7 @@ namespace {
     std::atomic<bool> g_callbackCalled{false};
     std::atomic<std::thread::id> g_callbackThreadId{};
 
-    void testCallback(const mka::audio::AudioProcessContext&) noexcept {
+    void testCallback(void*, const mka::audio::AudioProcessContext&) noexcept {
         g_callbackThreadId.store(std::this_thread::get_id());
         g_callbackCalled.store(true);
     }
@@ -573,7 +573,7 @@ namespace {
     double g_sinePhase = 0.0;
     double g_sinePhaseIncrement = 0.0;
 
-    void sineCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void sineCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         for (std::uint32_t i = 0; i < ctx.frames; ++i) {
             constexpr float amplitude = 0.2f;
             const auto sample = static_cast<float>(std::sin(g_sinePhase) * amplitude);
@@ -625,7 +625,7 @@ namespace {
     std::atomic<std::size_t> g_recordedFrames{0};
     std::size_t g_recordCapacityFrames = 0;
 
-    void recordCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void recordCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         const std::size_t framesLeft = g_recordCapacityFrames - g_recordedFrames.load();
         const std::size_t framesToCopy = std::min<std::size_t>(framesLeft, ctx.frames);
 
@@ -641,7 +641,7 @@ namespace {
 
     std::atomic<std::size_t> g_playbackFrames{0};
 
-    void playbackCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void playbackCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         const std::size_t framesLeft = g_recordCapacityFrames - g_playbackFrames.load();
         const std::size_t framesToCopy = std::min<std::size_t>(framesLeft, ctx.frames);
 

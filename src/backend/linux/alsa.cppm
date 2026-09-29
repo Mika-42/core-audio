@@ -522,7 +522,7 @@ export namespace mka::audio {
                 }
 
                 if (callback != nullptr) {
-                    callback(ctx);
+                    callback(userData, ctx);
                 }
 
                 if (playbackHandle_ != nullptr) {

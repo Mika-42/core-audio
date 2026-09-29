@@ -90,13 +90,13 @@ namespace {
         }
     }
 
-    void testCallback(const mka::audio::AudioProcessContext& ctx) noexcept {
+    void testCallback(void*, const mka::audio::AudioProcessContext& ctx) noexcept {
         g_callbackThreadId.store(std::this_thread::get_id());
         g_callbackCalled.store(true);
         silence(ctx);
     }
 
-    void inspectCallback(const mka::audio::AudioProcessContext& ctx) noexcept {
+    void inspectCallback(void*, const mka::audio::AudioProcessContext& ctx) noexcept {
         bool valid = true;
         for (std::uint32_t ch = 0; ch < ctx.input.count; ++ch) valid = valid && ctx.input.channels[ch] != nullptr;
         for (std::uint32_t ch = 0; ch < ctx.output.count; ++ch) valid = valid && ctx.output.channels[ch] != nullptr;
@@ -1174,10 +1174,9 @@ namespace {
     float g_sineGainStep = 0.0f;
     std::atomic<bool> g_sineFadeOut{false};
 
-    void sineCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
-        constexpr float amplitude = 0.2f;
-
+    void sineCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         for (std::uint32_t i = 0; i < ctx.frames; ++i) {
+            constexpr float amplitude = 0.2f;
             // Rampe de gain (fade-in au démarrage, fade-out avant l'arrêt) :
             // évite les clicks aux bords du signal.
             const float target = g_sineFadeOut.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
@@ -1242,7 +1241,7 @@ namespace {
     std::atomic<std::size_t> g_warmupFramesLeft{0};
     std::size_t g_recordCapacityFrames = 0;
 
-    void recordCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void recordCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         std::size_t start = 0;
         const std::size_t warm = g_warmupFramesLeft.load();
         if (warm > 0) {
@@ -1268,7 +1267,7 @@ namespace {
     std::size_t g_playbackLeadFrames = 0;
     std::size_t g_playbackTotalFrames = 0;
 
-    void playbackFromRecordCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void playbackFromRecordCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         const std::size_t pos = g_playbackPosition.load();
 
         for (std::uint32_t ch = 0; ch < ctx.output.count; ++ch) {
@@ -1387,7 +1386,7 @@ TEST(JackBackendTest, DISABLED_TestRecordAndPlayback) {
 //--- Test Duplex loopback (manuel, désactivé par défaut) --------------------
 
 namespace {
-    void loopbackCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void loopbackCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         if (ctx.input.count == 0) {
             silence(ctx);
             return;

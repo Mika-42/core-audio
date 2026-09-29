@@ -455,7 +455,7 @@ namespace {
     std::atomic<bool> g_callbackCalled{false};
     std::atomic<std::thread::id> g_callbackThreadId{};
 
-    void testCallback(const mka::audio::AudioProcessContext&) noexcept {
+    void testCallback(void*, const mka::audio::AudioProcessContext&) noexcept {
         g_callbackThreadId.store(std::this_thread::get_id());
         g_callbackCalled.store(true);
     }
@@ -653,7 +653,7 @@ namespace {
     double g_sinePhase = 0.0;
     double g_sinePhaseIncrement = 0.0;
 
-    void sineCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void sineCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         for (std::uint32_t i = 0; i < ctx.frames; ++i) {
             constexpr float amplitude = 0.2f;
             const auto sample = static_cast<float>(std::sin(g_sinePhase) * amplitude);
@@ -723,7 +723,7 @@ namespace {
     std::atomic<std::size_t> g_warmupFramesLeft{0};
     std::size_t g_recordCapacityFrames = 0;
 
-    void recordCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void recordCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         // Warm-up : ignore les premières frames (une seule écriture, depuis
         // le thread audio, donc load/store suffit).
         std::size_t start = 0;
@@ -752,7 +752,7 @@ namespace {
     std::size_t g_playbackLeadFrames = 0;
     std::size_t g_playbackTotalFrames = 0;
 
-    void playbackFromRecordCallback(const mka::audio::AudioProcessContext &ctx) noexcept {
+    void playbackFromRecordCallback(void*, const mka::audio::AudioProcessContext &ctx) noexcept {
         const std::size_t pos = g_playbackPosition.load();
 
         for (std::uint32_t ch = 0; ch < ctx.output.count; ++ch) {
