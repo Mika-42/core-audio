@@ -29,6 +29,11 @@ option(MKA_BUILD_JACK
 ON
 )
 
+option(MKA_BUILD_PULSEAUDIO
+"Build the PulseAudio backend"
+ON
+)
+
 
 # ============================================================
 # Global C++ configuration
@@ -165,6 +170,40 @@ cxx_std_26
 endif()
 
 # ============================================================
+# PulseAudio backend
+# ============================================================
+
+if(MKA_BUILD_PULSEAUDIO)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PULSEAUDIO REQUIRED IMPORTED_TARGET libpulse)
+
+add_library(mka-audio-pulseaudio)
+
+target_sources(mka-audio-pulseaudio
+PUBLIC
+FILE_SET CXX_MODULES
+BASE_DIRS
+src
+FILES
+src/backend/linux/pulseaudio.cppm
+)
+
+target_link_libraries(mka-audio-pulseaudio
+PRIVATE
+mka-core-audio
+PkgConfig::PULSEAUDIO
+)
+
+target_compile_features(
+mka-audio-pulseaudio
+PRIVATE
+cxx_std_26
+)
+
+endif()
+
+# ============================================================
 # Tests
 # ============================================================
 
@@ -200,6 +239,11 @@ endif()
 if(MKA_BUILD_JACK)
     target_sources(mka-core-audio-tests PRIVATE test/test_jack.cpp)
     target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-jack)
+endif()
+
+if(MKA_BUILD_PULSEAUDIO)
+    target_sources(mka-core-audio-tests PRIVATE test/test_pulseaudio.cpp)
+    target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-pulseaudio)
 endif()
 
 target_compile_features(
@@ -297,6 +341,35 @@ cxx_std_26
 gtest_discover_tests(
 mka-audio-jack-tests
 TEST_PREFIX "jack."
+)
+
+endif()
+
+# --------------------------------------------------------
+# PulseAudio tests
+# --------------------------------------------------------
+
+if(MKA_BUILD_PULSEAUDIO)
+
+add_executable(mka-audio-pulseaudio-tests
+        test/test_pulseaudio.cpp
+)
+
+target_link_libraries(mka-audio-pulseaudio-tests
+PRIVATE
+mka-audio-pulseaudio
+GTest::gtest_main
+)
+
+target_compile_features(
+mka-audio-pulseaudio-tests
+PRIVATE
+cxx_std_26
+)
+
+gtest_discover_tests(
+mka-audio-pulseaudio-tests
+TEST_PREFIX "pulseaudio."
 )
 
 endif()
