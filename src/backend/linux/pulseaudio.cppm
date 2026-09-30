@@ -18,6 +18,14 @@ import mka.audio.process;
 
 namespace mka::audio {
 
+    // Backend PulseAudio : "best effort", NON temps réel.
+    //  - Le callback audio s'exécute sur le thread du pa_threaded_mainloop, qui
+    //    n'est pas en SCHED_FIFO (le statut realtime reste donc Unknown).
+    //  - Il s'exécute sous le verrou du mainloop, partagé avec les opérations de
+    //    contrôle (start/stop/close) : celles-ci peuvent bloquer le callback.
+    //  - libpulse peut allouer en interne (pool de memblocks) dans
+    //    pa_stream_begin_write / pa_stream_drop.
+    // Pour du temps réel strict, utiliser JACK ou PipeWire.
     export class PulseAudio final : public Backend {
         public:
             PulseAudio() noexcept = default;
@@ -102,10 +110,16 @@ namespace mka::audio {
             std::size_t nbytes = suggested;
             if (pa_stream_begin_write(s, &data, &nbytes) < 0 || !data) return;
 
-            const std::size_t frames = nbytes / bytesPerFrame;
+            // Clamp défensif : scratch_ contient exactement bufferSize_ échantillons par canal.
+            const std::size_t frames = std::min<std::size_t>(nbytes / bytesPerFrame, self->bufferSize_);
+            if (frames == 0) {
+                // Évite une boucle infinie sous le verrou du mainloop.
+                pa_stream_cancel_write(s);
+                return;
+            }
             for (auto &ch : self->scratch_) std::fill_n(ch.data(), frames, 0.0f);
 
-                        if (self->callback) {
+            if (self->callback) {
                 const AudioProcessContext ctx{
                     .input = { nullptr, 0 },
                     .output = { self->outPtrs_.data(), self->channels_ },
@@ -121,7 +135,12 @@ namespace mka::audio {
                 }
             }
 
-            pa_stream_write(s, data, nbytes, nullptr, 0, PA_SEEK_RELATIVE);
+            // N'envoie que des trames complètes (pas d'octets de queue non initialisés).
+            nbytes = frames * bytesPerFrame;
+            if (pa_stream_write(s, data, nbytes, nullptr, 0, PA_SEEK_RELATIVE) < 0) {
+                if (self->active_.load(std::memory_order_acquire)) self->notifyXRun();
+                return;
+            }
             remaining -= std::min(remaining, nbytes);
         }
     }
@@ -138,6 +157,8 @@ namespace mka::audio {
             if (nbytes == 0) return;
 
             if (!data) {
+                // Trou dans le flux : données perdues côté serveur.
+                if (self->active_.load(std::memory_order_acquire)) self->notifyXRun();
                 pa_stream_drop(s);
                 continue;
             }
@@ -193,7 +214,7 @@ namespace mka::audio {
         const std::uint32_t channels = endpointCfg.direction == Direction::Input
             ? endpointCfg.inputChannels
             : endpointCfg.outputChannels;
-        if (channels == 0 || channels > 255)
+        if (channels == 0 || channels > PA_CHANNELS_MAX)
             return std::unexpected{ ErrorType::ChannelsNotSupported };
 
         if (!endpointCfg.id.empty()) {
@@ -216,6 +237,8 @@ namespace mka::audio {
         spec_.format = PA_SAMPLE_FLOAT32NE;
         spec_.rate = endpointCfg.sampleRate;
         spec_.channels = static_cast<std::uint8_t>(channels_);
+        if (!pa_sample_spec_valid(&spec_))
+            return std::unexpected{ ErrorType::ConfigurationFailed };
 
         scratch_.assign(channels_, std::vector<float>(bufferSize_, 0.0f));
         outPtrs_.assign(channels_, nullptr);
@@ -318,8 +341,14 @@ namespace mka::audio {
             pa_threaded_mainloop_wait(loop_);
         }
 
-        pa_threaded_mainloop_unlock(loop_);
+        // Un échec survenu entre READY et active_=true serait perdu (notifyFailed
+        // est conditionné par active_) : on revérifie l'état avant de publier.
+        if (!PA_STREAM_IS_GOOD(pa_stream_get_state(stream_))
+            || !PA_CONTEXT_IS_GOOD(pa_context_get_state(context_)))
+            return fail(ErrorType::EndpointUnavailable);
+
         active_.store(true, std::memory_order_release);
+        pa_threaded_mainloop_unlock(loop_);
         return {};
     }
 
