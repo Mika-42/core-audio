@@ -60,6 +60,7 @@ target_sources(mka-core-audio
         src/core/endpoint.cppm
         src/core/constants.cppm
         src/core/error.cppm
+        src/core/convert.cppm
 )
 
 target_compile_features(
@@ -219,6 +220,7 @@ if (MKA_BUILD_TESTS)
     add_executable(mka-core-audio-tests
             test/test_abstract_backend.cpp
             test/test_backend_userdata.cpp
+            test/test_convert.cpp
     )
 
     target_link_libraries(mka-core-audio-tests
