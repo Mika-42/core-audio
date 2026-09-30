@@ -155,53 +155,60 @@ namespace mka::audio {
             return std::unexpected{ error };
         };
 
-        // Endpoint demandé : doit exister avec la capacité voulue et assez de ports.
-        if (!endpointCfg.id.empty()) {
-            if (wantIn) {
-                inSources_ = portsOf(client_, endpointCfg.id, JackPortIsOutput);
-                if (inSources_.empty()) return fail(ErrorType::EndpointUnavailable);
-                if (inSources_.size() < nIn) return fail(ErrorType::ChannelsNotSupported);
-                inSources_.resize(nIn);
+        // Les allocations ci-dessous peuvent lever : on libère le client avant de
+        // relancer, sinon il fuit et un open() ultérieur écraserait client_.
+        try {
+            // Endpoint demandé : doit exister avec la capacité voulue et assez de ports.
+            if (!endpointCfg.id.empty()) {
+                if (wantIn) {
+                    inSources_ = portsOf(client_, endpointCfg.id, JackPortIsOutput);
+                    if (inSources_.empty()) return fail(ErrorType::EndpointUnavailable);
+                    if (inSources_.size() < nIn) return fail(ErrorType::ChannelsNotSupported);
+                    inSources_.resize(nIn);
+                }
+                if (wantOut) {
+                    outSinks_ = portsOf(client_, endpointCfg.id, JackPortIsInput);
+                    if (outSinks_.empty()) return fail(ErrorType::EndpointUnavailable);
+                    if (outSinks_.size() < nOut) return fail(ErrorType::ChannelsNotSupported);
+                    outSinks_.resize(nOut);
+                }
             }
-            if (wantOut) {
-                outSinks_ = portsOf(client_, endpointCfg.id, JackPortIsInput);
-                if (outSinks_.empty()) return fail(ErrorType::EndpointUnavailable);
-                if (outSinks_.size() < nOut) return fail(ErrorType::ChannelsNotSupported);
-                outSinks_.resize(nOut);
+
+            // Rate et buffer sont imposés par le serveur : on valide, on ne négocie pas.
+            if (jack_get_sample_rate(client_) != endpointCfg.sampleRate)
+                return fail(ErrorType::SampleRateNotSupported);
+            if (jack_get_buffer_size(client_) != endpointCfg.bufferSize)
+                return fail(ErrorType::BufferSizeNotSupported);
+
+            // Nos ports : ceux qui reçoivent sont JackPortIsInput, et inversement.
+            for (std::uint32_t i = 0; i < nIn; ++i) {
+                const std::string name = "in_" + std::to_string(i + 1);
+                jack_port_t *port = jack_port_register(client_, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+                if (!port) return fail(ErrorType::ConfigurationFailed);
+                inPorts_.push_back(port);
             }
+            for (std::uint32_t i = 0; i < nOut; ++i) {
+                const std::string name = "out_" + std::to_string(i + 1);
+                jack_port_t *port = jack_port_register(client_, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+                if (!port) return fail(ErrorType::ConfigurationFailed);
+                outPorts_.push_back(port);
+            }
+            inBuffers_.resize(nIn);
+            outBuffers_.resize(nOut);
+
+            if (jack_set_process_callback(client_, &JACK::onProcess, this) != 0)
+                return fail(ErrorType::ConfigurationFailed);
+
+            if (jack_set_xrun_callback(client_, &JACK::onXRun, this) != 0)
+                return fail(ErrorType::ConfigurationFailed);
+
+            jack_on_shutdown(client_, &JACK::onShutdown, this);
+
+            return {};
+        } catch (...) {
+            teardown();
+            throw; // la base convertit l'exception (ConfigurationFailed)
         }
-
-        // Rate et buffer sont imposés par le serveur : on valide, on ne négocie pas.
-        if (jack_get_sample_rate(client_) != endpointCfg.sampleRate)
-            return fail(ErrorType::SampleRateNotSupported);
-        if (jack_get_buffer_size(client_) != endpointCfg.bufferSize)
-            return fail(ErrorType::BufferSizeNotSupported);
-
-        // Nos ports : ceux qui reçoivent sont JackPortIsInput, et inversement.
-        for (std::uint32_t i = 0; i < nIn; ++i) {
-            const std::string name = "in_" + std::to_string(i + 1);
-            jack_port_t *port = jack_port_register(client_, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-            if (!port) return fail(ErrorType::ConfigurationFailed);
-            inPorts_.push_back(port);
-        }
-        for (std::uint32_t i = 0; i < nOut; ++i) {
-            const std::string name = "out_" + std::to_string(i + 1);
-            jack_port_t *port = jack_port_register(client_, name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
-            if (!port) return fail(ErrorType::ConfigurationFailed);
-            outPorts_.push_back(port);
-        }
-        inBuffers_.resize(nIn);
-        outBuffers_.resize(nOut);
-
-        if (jack_set_process_callback(client_, &JACK::onProcess, this) != 0)
-            return fail(ErrorType::ConfigurationFailed);
-
-        if (jack_set_xrun_callback(client_, &JACK::onXRun, this) != 0)
-            return fail(ErrorType::ConfigurationFailed);
-
-        jack_on_shutdown(client_, &JACK::onShutdown, this);
-
-        return {};
     }
 
     Result JACK::start_() {
@@ -236,14 +243,22 @@ namespace mka::audio {
     Result JACK::stop_() {
         // Retire le client du graphe : le serveur arrête d'appeler le callback
         // et jack_deactivate ne rend la main qu'une fois le thread audio quitté.
-        if (jack_deactivate(client_) != 0)
+        if (jack_deactivate(client_) != 0) {
+            // Serveur disparu (onShutdown → notifyFailed) : plus aucun callback
+            // ne peut s'exécuter, on considère le backend arrêté pour permettre
+            // la récupération stop() puis close().
+            if (status().failed)
+                return {};
             return std::unexpected{ ErrorType::ConfigurationFailed };
+        }
         return {};
     }
 
     Result JACK::close_() {
-        if (teardown() != 0)
-            return std::unexpected{ ErrorType::ConfigurationFailed };
+        // Le client est libéré dans tous les cas (client_ repasse à nullptr) : un
+        // échec de jack_client_close n'est pas récupérable, on ne le remonte pas
+        // pour ne pas laisser l'état Open avec un client nul.
+        teardown();
         return {};
     }
 
