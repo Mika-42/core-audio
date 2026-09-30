@@ -221,6 +221,7 @@ if (MKA_BUILD_TESTS)
             test/test_abstract_backend.cpp
             test/test_backend_userdata.cpp
             test/test_backend_events.cpp
+            test/test_backend_robustness.cpp
             test/test_convert.cpp
     )
 

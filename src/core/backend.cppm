@@ -4,7 +4,9 @@
 // Cette version inclut :
 //  B1  ProcessFunction avec contexte utilisateur (void* user) ;
 //  B8  remontée d'erreurs à l'exécution : compteur d'xruns, drapeau "flux mort",
-//      et gestionnaire d'événements appelé HORS du thread audio.
+//      et gestionnaire d'événements appelé HORS du thread audio ;
+//  TS  opérations de contrôle sérialisées par un mutex, exceptions des hooks
+//      converties en erreurs (les méthodes publiques ne lèvent jamais).
 //
 module;
 #include <atomic>
@@ -15,6 +17,7 @@ module;
 #include <mutex>
 #include <stop_token>
 #include <thread>
+#include <utility>
 #include <vector>
 export module mka.audio.backend.abstract;
 export import mka.audio.error;
@@ -36,12 +39,17 @@ export namespace mka::audio {
         Failed,
     };
 
-    enum class RealtimeState { Unknown, No, Yes };
-
     struct Event {
         EventType type;
         std::uint64_t xruns;
     };
+
+    // Le thread audio tourne-t-il en priorité temps réel ?
+    //  Yes / No : le backend le sait (ALSA : SCHED_FIFO obtenu ou refusé ;
+    //             JACK : le serveur est-il en mode realtime).
+    //  Unknown  : le thread appartient à un serveur ou une lib que le backend ne
+    //             peut pas interroger (PipeWire, PulseAudio), ou avant start().
+    enum class RealtimeState : std::uint8_t { Unknown, No, Yes };
 
     // Instantané lisible à tout moment, depuis n'importe quel thread.
     struct Status {
@@ -67,18 +75,31 @@ export namespace mka::audio {
             Backend(Backend&&) = delete;
             Backend& operator=(Backend&&) = delete;
 
-            [[nodiscard]] virtual Result open(EndpointConfig const &endpointCfg) final {
+            // Toutes les opérations de contrôle sont sérialisées par un mutex : elles peuvent
+            // être appelées depuis plusieurs threads sans course sur l'état. Les hooks *_
+            // des classes filles peuvent lever des exceptions : elles sont converties en
+            // ErrorType::ConfigurationFailed (le backend reste dans son état précédent).
+            // Aucune de ces méthodes ne peut être appelée depuis le handler d'événements
+            // (elles renvoient InvalidState), sinon stop() s'attendrait lui-même.
+
+            [[nodiscard]] Result open(EndpointConfig const &endpointCfg) {
+                if (calledFromDispatcher()) return std::unexpected{ ErrorType::InvalidState };
+                std::scoped_lock lock(controlMutex_);
+
                 if (state != State::Closed) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
 
-                return open_(endpointCfg).and_then([&]() -> Result {
+                return guarded([&] { return open_(endpointCfg); }).and_then([&]() -> Result {
                     state = State::Open;
                     return {};
                 });
             }
 
-            [[nodiscard]] virtual Result setProcessFunction(const ProcessFunction callback, void* user = nullptr) final {
+            [[nodiscard]] Result setProcessFunction(const ProcessFunction callback, void* user = nullptr) {
+                if (calledFromDispatcher()) return std::unexpected{ ErrorType::InvalidState };
+                std::scoped_lock lock(controlMutex_);
+
                 if (state == State::Running) {
                     return std::unexpected{ ErrorType::InvalidState};
                 }
@@ -90,6 +111,9 @@ export namespace mka::audio {
 
             // Enregistre (ou retire avec nullptr) le gestionnaire d'événements.
             [[nodiscard]] Result setEventHandler(const EventHandler handler, void* user = nullptr) {
+                if (calledFromDispatcher()) return std::unexpected{ ErrorType::InvalidState };
+                std::scoped_lock lock(controlMutex_);
+
                 if (state == State::Running) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -99,16 +123,20 @@ export namespace mka::audio {
                 return {};
             }
 
-            // Compteurs et état d'échec, sans verrou ni allocation.
+            // Compteurs et état d'échec, sans verrou ni allocation (utilisable depuis
+            // n'importe quel thread, y compris pendant un start()/stop() en cours).
             [[nodiscard]] Status status() const noexcept {
                 return Status{
                     .xruns = xruns_.load(std::memory_order_relaxed),
                     .failed = failed_.load(std::memory_order_acquire),
-                    .realtime = static_cast<RealtimeState>(realtime_.load(std::memory_order_acquire))
+                    .realtime = static_cast<RealtimeState>(realtime_.load(std::memory_order_acquire)),
                 };
             }
 
-            [[nodiscard]] virtual Result start() final {
+            [[nodiscard]] Result start() {
+                if (calledFromDispatcher()) return std::unexpected{ ErrorType::InvalidState };
+                std::scoped_lock lock(controlMutex_);
+
                 if (state != State::Open) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
@@ -119,37 +147,49 @@ export namespace mka::audio {
                 failed_.store(false, std::memory_order_release);
                 realtime_.store(static_cast<std::uint8_t>(RealtimeState::Unknown), std::memory_order_release);
 
-                return start_().and_then([&]() -> Result {
+                return guarded([&] { return start_(); }).and_then([&]() -> Result {
                     state = State::Running;
                     startDispatcher();
                     return {};
                 });
             }
 
-            [[nodiscard]] virtual Result stop() final {
+            [[nodiscard]] Result stop() {
+                if (calledFromDispatcher()) return std::unexpected{ ErrorType::InvalidState };
+                std::scoped_lock lock(controlMutex_);
+
                 if (state != State::Running) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
 
-                return stop_().and_then([&]() -> Result {
+                return guarded([&] { return stop_(); }).and_then([&]() -> Result {
                     stopDispatcher();
                     state = State::Open;
                     return {};
                 });
-            };
+            }
 
-            [[nodiscard]] virtual Result close() final {
+            [[nodiscard]] Result close() {
+                if (calledFromDispatcher()) return std::unexpected{ ErrorType::InvalidState };
+                std::scoped_lock lock(controlMutex_);
+
                 if (state != State::Open) {
                     return std::unexpected{ ErrorType::InvalidState };
                 }
-                return close_().and_then([&]() -> Result {
+
+                return guarded([&] { return close_(); }).and_then([&]() -> Result {
                     state = State::Closed;
                     return {};
                 });
-            };
+            }
 
-            [[nodiscard]] virtual std::vector<Endpoint> getEndPoints() const final {
-                return getEndPoints_();
+            // Ne dépend pas de l'état : pas de verrou. Une exception donne une liste vide.
+            [[nodiscard]] std::vector<Endpoint> getEndPoints() const noexcept {
+                try {
+                    return getEndPoints_();
+                } catch (...) {
+                    return {};
+                }
             }
 
         protected:
@@ -169,7 +209,9 @@ export namespace mka::audio {
                 failed_.store(true, std::memory_order_release);
             }
 
-        void notifyRealtime(const bool granted) noexcept {
+            // À appeler pendant start_() dès que le backend sait si son thread audio
+            // est en temps réel. Sans appel, le statut reste Unknown.
+            void notifyRealtime(const bool granted) noexcept {
                 realtime_.store(static_cast<std::uint8_t>(granted ? RealtimeState::Yes : RealtimeState::No),
                                 std::memory_order_release);
             }
@@ -179,6 +221,25 @@ export namespace mka::audio {
         private:
             enum class State { Closed, Open, Running };
             State state = State::Closed;
+
+            // Exécute un hook de classe fille en convertissant toute exception en erreur.
+            template <class Hook>
+            [[nodiscard]] static Result guarded(Hook&& hook) noexcept {
+                try {
+                    return std::forward<Hook>(hook)();
+                } catch (...) {
+                    return std::unexpected{ ErrorType::ConfigurationFailed };
+                }
+            }
+
+            // Vrai si l'appelant est le thread du handler d'événements de CE backend.
+            [[nodiscard]] bool calledFromDispatcher() const noexcept {
+                return dispatchingFor_ == this;
+            }
+
+            static inline thread_local const Backend* dispatchingFor_ = nullptr;
+
+            std::mutex controlMutex_;
 
             static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
             static_assert(std::atomic<bool>::is_always_lock_free);
@@ -200,14 +261,19 @@ export namespace mka::audio {
                 }
             }
 
-            void stopDispatcher() {
-                if (dispatcher_.joinable()) {
-                    dispatcher_.request_stop();
-                    dispatcher_.join();
+            void stopDispatcher() noexcept {
+                try {
+                    if (dispatcher_.joinable()) {
+                        dispatcher_.request_stop();
+                        dispatcher_.join();
+                    }
+                } catch (...) {
+                    // join() ne peut échouer que sur un interblocage : on ne peut rien de plus.
                 }
             }
 
-            void dispatchLoop(const std::stop_token stopToken) noexcept {
+            void dispatchLoop(const std::stop_token& stopToken) noexcept {
+                dispatchingFor_ = this;   // marque ce thread : voir calledFromDispatcher()
                 std::uint64_t lastXRuns = 0;
                 bool failedSent = false;
 
