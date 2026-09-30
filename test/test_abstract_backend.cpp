@@ -4,7 +4,7 @@
 #include <expected>
 #include <gtest/gtest.h>
 
-import mka.audio.backend;
+import mka.audio.backend.abstract;
 
 namespace {
     class BackendImpl : public mka::audio::Backend {

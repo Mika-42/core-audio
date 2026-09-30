@@ -41,7 +41,7 @@ module;
 #endif
 
 export module mka.audio.backend.alsa;
-export import mka.audio.backend;
+export import mka.audio.backend.abstract;
 import mka.audio.constants;
 import mka.audio.process;
 import mka.audio.convert;

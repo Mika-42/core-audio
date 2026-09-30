@@ -10,7 +10,7 @@
 #include <vector>
 #include <gtest/gtest.h>
 
-import mka.audio.backend;
+import mka.audio.backend.abstract;
 
 namespace {
     // Backend minimal : les hooks réussissent toujours, et deux accesseurs
