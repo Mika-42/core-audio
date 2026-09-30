@@ -59,6 +59,7 @@ namespace mka::audio {
         std::vector<float *> outChannels_;
         std::atomic<bool> ready_ = false;
         std::atomic<bool> failed_ = false;
+        std::atomic<bool> active_ = false;
     };
 
     // --- Callbacks stream -------------------------------------------------
@@ -68,11 +69,16 @@ namespace mka::audio {
         switch (state) {
             case PW_STREAM_STATE_STREAMING:
                 self->ready_.store(true, std::memory_order_release);
+                self->active_.store(true, std::memory_order_release);
                 pw_thread_loop_signal(self->loop_, false);
                 break;
             case PW_STREAM_STATE_ERROR:
                 self->failed_.store(true, std::memory_order_release);
+                if (self->active_.load(std::memory_order_acquire)) self->notifyFailed();
                 pw_thread_loop_signal(self->loop_, false);
+                break;
+            case PW_STREAM_STATE_UNCONNECTED:   // serveur parti ou nœud supprimé
+                if (self->active_.load(std::memory_order_acquire)) self->notifyFailed();
                 break;
             default:
                 break;
@@ -83,7 +89,7 @@ namespace mka::audio {
         auto *self = static_cast<PipeWire *>(data);
 
         pw_buffer *b = pw_stream_dequeue_buffer(self->stream_);
-        if (!b) return;
+        if (!b) { self->notifyXRun(); return; }
 
         spa_buffer *buf = b->buffer;
 
@@ -311,6 +317,7 @@ namespace mka::audio {
     }
 
     Result PipeWire::stop_() {
+        active_.store(false, std::memory_order_release);
         if (stream_) {
             pw_thread_loop_lock(loop_);
             pw_stream_set_active(stream_, false);
@@ -329,6 +336,7 @@ namespace mka::audio {
     }
 
     void PipeWire::teardownStream() noexcept {
+        active_.store(false, std::memory_order_release);
         if (stream_) {
             pw_stream_destroy(stream_);
             stream_ = nullptr;

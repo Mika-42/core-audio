@@ -2,6 +2,7 @@
 module;
 #include <pulse/pulseaudio.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <string>
@@ -37,7 +38,7 @@ namespace mka::audio {
             static void onStreamState(pa_stream *s, void *userdata);
             static void onStreamWrite(pa_stream *s, std::size_t requestedBytes, void *userdata);
             static void onStreamRead(pa_stream *s, std::size_t nbytesAvail, void *userdata);
-
+            static void onStreamXRun(pa_stream *s, void *userdata);
             void disconnectLocked() noexcept;
 
             void teardown() noexcept;
@@ -57,18 +58,34 @@ namespace mka::audio {
             std::vector<std::vector<float>> scratch_;
             std::vector<float *> outPtrs_;
             std::vector<const float *> inPtrs_;
+            std::atomic<bool> active_ = false;
     };
 
     // --- Thread audio -------------------------------------------------------
 
-    void PulseAudio::onContextState(pa_context * /*c*/, void *userdata) {
+    void PulseAudio::onContextState(pa_context *c, void *userdata) {
         auto *self = static_cast<PulseAudio *>(userdata);
+        const auto st = pa_context_get_state(c);
+        if (self->active_.load(std::memory_order_acquire)
+            && (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED)) {
+            self->notifyFailed();
+            }
         pa_threaded_mainloop_signal(self->loop_, 0);
     }
 
-    void PulseAudio::onStreamState(pa_stream * /*s*/, void *userdata) {
+    void PulseAudio::onStreamState(pa_stream *s, void *userdata) {
         auto *self = static_cast<PulseAudio *>(userdata);
+        const auto st = pa_stream_get_state(s);
+        if (self->active_.load(std::memory_order_acquire)
+            && (st == PA_STREAM_FAILED || st == PA_STREAM_TERMINATED)) {
+            self->notifyFailed();
+            }
         pa_threaded_mainloop_signal(self->loop_, 0);
+    }
+
+    void PulseAudio::onStreamXRun(pa_stream *, void *userdata) {
+        auto *self = static_cast<PulseAudio *>(userdata);
+        if (self->active_.load(std::memory_order_acquire)) self->notifyXRun();
     }
 
     void PulseAudio::onStreamWrite(pa_stream *s, const std::size_t requestedBytes, void *userdata) {
@@ -215,6 +232,8 @@ namespace mka::audio {
     }
 
     void PulseAudio::disconnectLocked() noexcept {
+        active_.store(false, std::memory_order_release);
+        
         if (stream_) {
             pa_stream_set_write_callback(stream_, nullptr, nullptr);
             pa_stream_set_read_callback(stream_, nullptr, nullptr);
@@ -267,6 +286,9 @@ namespace mka::audio {
         stream_ = pa_stream_new(context_, "mka-audio-stream", &spec_, nullptr);
         if (!stream_) return fail(ErrorType::ConfigurationFailed);
         pa_stream_set_state_callback(stream_, &PulseAudio::onStreamState, this);
+        pa_stream_set_underflow_callback(stream_, &PulseAudio::onStreamXRun, this);
+        pa_stream_set_overflow_callback(stream_, &PulseAudio::onStreamXRun, this);
+
 
         const auto bytesPerFrame = static_cast<std::uint32_t>(channels_ * sizeof(float));
         pa_buffer_attr attr{};
@@ -297,6 +319,7 @@ namespace mka::audio {
         }
 
         pa_threaded_mainloop_unlock(loop_);
+        active_.store(true, std::memory_order_release);
         return {};
     }
 
