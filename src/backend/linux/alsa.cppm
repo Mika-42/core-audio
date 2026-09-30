@@ -3,7 +3,8 @@
 //
 // Correctifs de la revue :
 //  B2  récupération d'xrun : toute erreur (-EPIPE, -ESTRPIPE...) relance le flux
-//      (drop -> prepare -> préremplissage -> start) au lieu de boucler à vide ;
+//      (drop -> prepare -> préremplissage -> start) au lieu de boucler à vide,
+//      chaque xrun étant compté (Backend::status().xruns) ;
 //      snd_pcm_avail_update est appelé avant chaque mmap_begin ; les commits courts
 //      sont traités comme des xruns.
 //  B3  duplex : capture et lecture sont liées (snd_pcm_link) et démarrées ensemble ;
@@ -15,7 +16,8 @@
 //  B5  thread audio en SCHED_FIFO (repli sur priorités plus basses), nommé, avec
 //      FTZ/DAZ activés. Si le système refuse (pas de droit rtprio), le backend
 //      fonctionne quand même : hasRealtimePriority() renvoie alors false.
-//  Inclut aussi B1 (userData) et B7 (sortie remise à zéro avant le callback).
+//  Inclut aussi B1 (userData), B7 (sortie remise à zéro avant le callback) et B8
+//  (xruns et échec de flux remontés via Backend::notifyXRun / notifyFailed).
 //
 module;
 #include <algorithm>
@@ -55,21 +57,6 @@ export namespace mka::audio {
                 audioThread_.join();
             }
             closeHandles();
-        }
-
-        // Nombre de xruns (over/underruns) récupérés depuis le dernier start().
-        [[nodiscard]] std::uint64_t xrunCount() const noexcept {
-            return xruns_.load(std::memory_order_relaxed);
-        }
-
-        // true si le thread audio a obtenu SCHED_FIFO.
-        [[nodiscard]] bool hasRealtimePriority() const noexcept {
-            return realtime_.load(std::memory_order_acquire);
-        }
-
-        // true si le flux est mort (périphérique disparu, récupération impossible).
-        [[nodiscard]] bool hasFailed() const noexcept {
-            return failed_.load(std::memory_order_acquire);
         }
 
     protected:
@@ -124,8 +111,6 @@ export namespace mka::audio {
         }
 
         [[nodiscard]] Result start_() override {
-            failed_.store(false, std::memory_order_relaxed);
-            xruns_.store(0, std::memory_order_relaxed);
             realtime_.store(false, std::memory_order_relaxed);
 
             Result started;
@@ -774,14 +759,14 @@ export namespace mka::audio {
 
                 if (stopToken.stop_requested()) break;
 
-                xruns_.fetch_add(1, std::memory_order_relaxed);
+                notifyXRun();
                 if (recover(result)) {
                     consecutiveFailures = 0;
                     continue;
                 }
 
                 if (++consecutiveFailures >= kMaxRecoveryFailures || result == -ENODEV) {
-                    failed_.store(true, std::memory_order_release);
+                    notifyFailed();
                     return;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -824,8 +809,6 @@ export namespace mka::audio {
         bool threadReady_ = false;
         Result startResult_;
 
-        std::atomic<std::uint64_t> xruns_{0};
         std::atomic<bool> realtime_{false};
-        std::atomic<bool> failed_{false};
     };
 }

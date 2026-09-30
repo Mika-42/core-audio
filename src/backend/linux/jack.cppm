@@ -60,6 +60,8 @@ namespace mka::audio {
 
         private:
             static int onProcess(jack_nframes_t nframes, void *arg);
+            static int onXRun(void *arg);
+            static void onShutdown(void *arg);
 
             // Ferme le client (ce qui le désactive et désenregistre ses ports).
             // Renvoie le code de jack_client_close.
@@ -194,6 +196,11 @@ namespace mka::audio {
         if (jack_set_process_callback(client_, &JACK::onProcess, this) != 0)
             return fail(ErrorType::ConfigurationFailed);
 
+        if (jack_set_xrun_callback(client_, &JACK::onXRun, this) != 0)
+            return fail(ErrorType::ConfigurationFailed);
+
+        jack_on_shutdown(client_, &JACK::onShutdown, this);
+
         return {};
     }
 
@@ -201,6 +208,8 @@ namespace mka::audio {
         // jack_activate crée/démarre le thread audio du client.
         if (jack_activate(client_) != 0)
             return std::unexpected{ ErrorType::ConfigurationFailed };
+
+        notifyRealtime(jack_is_realtime(client_) != 0);
 
         // jack_deactivate (stop_) retire les connexions : on les refait ici.
         // EEXIST = déjà connecté, pas une erreur.
@@ -287,4 +296,13 @@ namespace mka::audio {
         }
     }
 
+    int JACK::onXRun(void *arg) {
+        static_cast<JACK *>(arg)->notifyXRun();   // thread de notification, non RT
+        return 0;
+    }
+
+    void JACK::onShutdown(void *arg) {
+        // Peut s'exécuter dans un contexte de signal : atomique uniquement.
+        static_cast<JACK *>(arg)->notifyFailed();
+    }
 }
