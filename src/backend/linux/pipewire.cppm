@@ -12,7 +12,7 @@ module;
 
 export module mka.audio.backend.pipewire;
 
-import mka.audio.backend;
+import mka.audio.backend.abstract;
 import mka.audio.error;
 import mka.audio.endpoint;
 import mka.audio.constants;

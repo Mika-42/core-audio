@@ -4,7 +4,7 @@
 module;
 #include <expected>
 #include <vector>
-export module mka.audio.backend;
+export module mka.audio.backend.abstract;
 export import mka.audio.error;
 export import mka.audio.endpoint;
 export import mka.audio.constants;
