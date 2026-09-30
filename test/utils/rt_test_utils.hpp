@@ -21,6 +21,12 @@ namespace alloc_probe {
     void ignoreCurrentThread() noexcept;   // à appeler depuis le thread de test
     void arm() noexcept;                   // remet le compteur à 0 et démarre le comptage
     std::size_t disarm() noexcept;         // arrête le comptage, renvoie le total
+
+    // Sonde malloc/calloc/realloc/free (glibc) limitée aux threads audio :
+    // le callback de test appelle markAudioThread() à chaque cycle.
+    void markAudioThread() noexcept;
+    void armAudio() noexcept;
+    std::size_t disarmAudio() noexcept;
 }
 
 namespace rt_test {
@@ -85,5 +91,48 @@ namespace rt_test {
     // Nombre de cycles à observer avant de conclure (assez pour que les pools
     // de buffers tournants, ex. PipeWire, réutilisent des buffers déjà salis).
     inline constexpr int kMinCycles = 64;
+
+    // --- Contrat "aucun callback après stop()" ----------------------------------
+
+    struct StopContractState {
+        std::atomic<int> calls{0};
+    };
+
+    // Callback de test : marque le thread comme audio (sonde malloc) et compte.
+    template <class Ctx>
+    void countAudioCall(StopContractState& s, const Ctx&) noexcept {
+        alloc_probe::markAudioThread();
+        s.calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Démarre/arrête `rounds` fois en martelant status() depuis un autre thread.
+    // Après chaque stop(), le compteur d'appels ne doit plus bouger.
+    // Renvoie une chaîne vide si tout va bien, sinon la raison de l'échec.
+    template <class B>
+    const char* stopStress(B& backend, StopContractState& s, const int rounds = 10) {
+        std::atomic<bool> hammering{true};
+        std::thread hammer([&] {
+            while (hammering.load(std::memory_order_relaxed)) {
+                (void)backend.status();
+                std::this_thread::yield();
+            }
+        });
+
+        const char* failure = "";
+        for (int r = 0; r < rounds && *failure == '\0'; ++r) {
+            const int before = s.calls.load();
+            if (!backend.start()) { failure = "start() a échoué"; break; }
+            if (!waitFor([&] { return s.calls.load() >= before + 4; })) failure = "pas de cycles après start()";
+            if (!backend.stop()) { failure = "stop() a échoué"; break; }
+
+            const int atStop = s.calls.load();
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            if (s.calls.load() != atStop) failure = "callback appelé après le retour de stop()";
+        }
+
+        hammering.store(false, std::memory_order_relaxed);
+        hammer.join();
+        return failure;
+    }
 
 }

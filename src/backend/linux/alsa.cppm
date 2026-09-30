@@ -15,7 +15,7 @@
 //      arrondi, plus de reinterpret_cast).
 //  B5  thread audio en SCHED_FIFO (repli sur priorités plus basses), nommé, avec
 //      FTZ/DAZ activés. Si le système refuse (pas de droit rtprio), le backend
-//      fonctionne quand même : hasRealtimePriority() renvoie alors false.
+//      fonctionne quand même : le statut realtime vaut alors No.
 //  Inclut aussi B1 (userData), B7 (sortie remise à zéro avant le callback) et B8
 //  (xruns et échec de flux remontés via Backend::notifyXRun / notifyFailed).
 //
@@ -111,8 +111,6 @@ export namespace mka::audio {
         }
 
         [[nodiscard]] Result start_() override {
-            realtime_.store(false, std::memory_order_relaxed);
-
             Result started;
             try {
                 {
@@ -129,6 +127,15 @@ export namespace mka::audio {
                 threadReadyCv_.wait(lock, [this] { return threadReady_; });
                 started = startResult_;
             } catch (...) {
+                // Le thread audio peut déjà tourner : on l'arrête avant de rendre la
+                // main, sinon un close() ultérieur fermerait les PCM sous ses pieds.
+                try {
+                    if (audioThread_.joinable()) {
+                        audioThread_.request_stop();
+                        audioThread_.join();
+                    }
+                } catch (...) {
+                }
                 return std::unexpected{ErrorType::ConfigurationFailed};
             }
 
@@ -652,9 +659,13 @@ export namespace mka::audio {
             if (err == -ENODEV) return false;   // périphérique disparu : irrécupérable
 
             if (err == -ESTRPIPE) {
-                // Suspend/resume système : reprise standard (se replie sur prepare).
-                if (capture_) snd_pcm_recover(capture_.pcm, err, 1);
-                if (playback_) snd_pcm_recover(playback_.pcm, err, 1);
+                // Suspend/resume système : on tente UN snd_pcm_resume() non bloquant
+                // par flux et on ignore le résultat. snd_pcm_recover() boucle sans
+                // borne (while resume == -EAGAIN sleep(1)) sans regarder le stop_token,
+                // ce qui bloquerait stop()/close(). Si le resume échoue, le
+                // drop + prepare + start de beginStreaming() sert de repli documenté.
+                if (capture_) (void)snd_pcm_resume(capture_.pcm);
+                if (playback_) (void)snd_pcm_resume(playback_.pcm);
             }
             return beginStreaming().has_value();
         }
@@ -691,7 +702,7 @@ export namespace mka::audio {
 
         void threadMain(const std::stop_token &stopToken) noexcept {
             pthread_setname_np(pthread_self(), "mka-alsa");
-            realtime_.store(requestRealtimePriority(), std::memory_order_release);
+            notifyRealtime(requestRealtimePriority());
             flushDenormals();
 
             const Result started = beginStreaming();
@@ -759,7 +770,11 @@ export namespace mka::audio {
 
                 if (stopToken.stop_requested()) break;
 
-                notifyXRun();
+                // Un seul xrun par incident : pas de recomptage pour les tentatives
+                // de récupération successives, ni pour les erreurs autres qu'un xrun.
+                if (consecutiveFailures == 0 && (result == -EPIPE || result == -ESTRPIPE)) {
+                    notifyXRun();
+                }
                 if (recover(result)) {
                     consecutiveFailures = 0;
                     continue;
@@ -769,7 +784,10 @@ export namespace mka::audio {
                     notifyFailed();
                     return;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // Backoff de 10 ms en tranches de 1 ms, interrompu par une demande d'arrêt.
+                for (int slice = 0; slice < 10 && !stopToken.stop_requested(); ++slice) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
             }
         }
 
@@ -808,7 +826,5 @@ export namespace mka::audio {
         std::condition_variable threadReadyCv_;
         bool threadReady_ = false;
         Result startResult_;
-
-        std::atomic<bool> realtime_{false};
     };
 }

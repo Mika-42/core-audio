@@ -4,10 +4,12 @@ module;
 #include <spa/utils/dict.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <string>
+#include <thread>
 #include <vector>
 
 export module mka.audio.backend.pipewire;
@@ -48,6 +50,8 @@ namespace mka::audio {
 
         void teardownStream() noexcept;
 
+        void waitProcessQuiescent() noexcept;
+
         pw_thread_loop *loop_ = nullptr;
         pw_stream *stream_ = nullptr;
 
@@ -60,7 +64,28 @@ namespace mka::audio {
         std::atomic<bool> ready_ = false;
         std::atomic<bool> failed_ = false;
         std::atomic<bool> active_ = false;
+
+        // Poignée de main de quiescence (style Dekker), les DEUX côtés en seq_cst :
+        //  - onProcess : inProcess_ = true ; puis lit processEnabled_ ;
+        //  - stop_/rollback : processEnabled_ = false ; puis attend inProcess_ == false.
+        // Ainsi, soit onProcess voit processEnabled_ == false (et n'appelle pas le
+        // callback), soit le thread de contrôle voit inProcess_ == true et attend.
+        // Garantit : plus aucun appel du callback une fois stop() revenu.
+        alignas(64) std::atomic<bool> processEnabled_ = false;
+        alignas(64) std::atomic<bool> inProcess_ = false;
     };
+
+    namespace {
+        // Efface inProcess_ sur tous les chemins de sortie de onProcess.
+        struct InProcessGuard {
+            std::atomic<bool> &flag;
+
+            ~InProcessGuard() { flag.store(false, std::memory_order_release); }
+        };
+
+        constexpr std::chrono::seconds kStartTimeout{5};
+        constexpr std::chrono::seconds kStopTimeout{2};
+    }
 
     // --- Callbacks stream -------------------------------------------------
 
@@ -69,13 +94,14 @@ namespace mka::audio {
         switch (state) {
             case PW_STREAM_STATE_STREAMING:
                 self->ready_.store(true, std::memory_order_release);
-                self->active_.store(true, std::memory_order_release);
-                pw_thread_loop_signal(self->loop_, false);
+                // Un STREAMING en retard, traité après stop_(), ne doit pas réarmer active_.
+                if (self->processEnabled_.load(std::memory_order_seq_cst)) {
+                    self->active_.store(true, std::memory_order_release);
+                }
                 break;
             case PW_STREAM_STATE_ERROR:
                 self->failed_.store(true, std::memory_order_release);
                 if (self->active_.load(std::memory_order_acquire)) self->notifyFailed();
-                pw_thread_loop_signal(self->loop_, false);
                 break;
             case PW_STREAM_STATE_UNCONNECTED:   // serveur parti ou nœud supprimé
                 if (self->active_.load(std::memory_order_acquire)) self->notifyFailed();
@@ -83,15 +109,39 @@ namespace mka::audio {
             default:
                 break;
         }
+        // Réveille start_()/stop_() qui attendent une transition d'état.
+        pw_thread_loop_signal(self->loop_, false);
     }
 
     void PipeWire::onProcess(void *data) {
         auto *self = static_cast<PipeWire *>(data);
 
+        self->inProcess_.store(true, std::memory_order_seq_cst);
+        const InProcessGuard guard{self->inProcess_};
+        const bool enabled = self->processEnabled_.load(std::memory_order_seq_cst);
+
         pw_buffer *b = pw_stream_dequeue_buffer(self->stream_);
-        if (!b) { self->notifyXRun(); return; }
+        if (!b) {
+            if (enabled) self->notifyXRun();
+            return;
+        }
 
         spa_buffer *buf = b->buffer;
+
+        // Arrêt en cours : on rend le buffer (silence en sortie), sans callback.
+        if (!enabled) {
+            if (self->direction_ == Direction::Output) {
+                for (std::uint32_t i = 0; i < buf->n_datas; ++i) {
+                    spa_data &d = buf->datas[i];
+                    if (!d.chunk) continue;
+                    d.chunk->offset = 0;
+                    d.chunk->stride = sizeof(float);
+                    d.chunk->size = 0;
+                }
+            }
+            pw_stream_queue_buffer(self->stream_, b);
+            return;
+        }
 
         // F32P = un plan par canal : on attend exactement channels_ plans.
         const bool layoutOk = buf->n_datas == self->channels_;
@@ -100,19 +150,27 @@ namespace mka::audio {
             std::uint32_t frames = 0;
             bool ok = layoutOk;
 
-            for (std::uint32_t i = 0; ok && i < self->channels_; ++i) {
-                const spa_data &d = buf->datas[i];
-                if (!d.data || !d.chunk) {
-                    ok = false;
-                    break;
+            if (ok) {
+                frames = UINT32_MAX;
+                for (std::uint32_t i = 0; i < self->channels_; ++i) {
+                    const spa_data &d = buf->datas[i];
+                    if (!d.data || !d.chunk) {
+                        ok = false;
+                        break;
+                    }
+
+                    const std::uint32_t off = std::min(d.chunk->offset, d.maxsize);
+                    const std::uint32_t size = std::min(d.chunk->size, d.maxsize - off);
+
+                    self->inChannels_[i] = reinterpret_cast<const float *>(
+                        static_cast<const std::byte *>(d.data) + off);
+                    // Minimum sur les canaux : chaque plan est valide sur `frames` échantillons.
+                    frames = std::min<std::uint32_t>(frames, size / sizeof(float));
                 }
-
-                const std::uint32_t off = std::min(d.chunk->offset, d.maxsize);
-                const std::uint32_t size = std::min(d.chunk->size, d.maxsize - off);
-
-                self->inChannels_[i] = reinterpret_cast<const float *>(
-                    static_cast<const std::byte *>(d.data) + off);
-                frames = size / sizeof(float);
+            }
+            if (!ok) {
+                frames = 0;
+                self->notifyXRun();
             }
 
             if (ok && frames > 0 && self->callback) {
@@ -143,7 +201,10 @@ namespace mka::audio {
                     frames = std::min<std::uint32_t>(frames, static_cast<std::uint32_t>(b->requested));
                 }
             }
-            if (!ok) frames = 0;
+            if (!ok) {
+                frames = 0;
+                self->notifyXRun();
+            }
 
             if (frames > 0) {
                 // B7 : sortie à zéro avant le callback.
@@ -216,6 +277,10 @@ namespace mka::audio {
 
         direction_ = endpointCfg.direction;
 
+        // Construit AVANT toute ressource native : to_string peut lever.
+        const std::string latency = std::to_string(endpointCfg.bufferSize) + "/" +
+                                    std::to_string(endpointCfg.sampleRate);
+
         loop_ = pw_thread_loop_new("mka-audio-pipewire", nullptr);
         if (!loop_) return std::unexpected{ErrorType::ConfigurationFailed};
 
@@ -224,7 +289,7 @@ namespace mka::audio {
             PW_KEY_MEDIA_CATEGORY, direction_ == Direction::Input ? "Capture" : "Playback",
             PW_KEY_MEDIA_ROLE, "Production",
             PW_KEY_NODE_LATENCY,
-            (std::to_string(endpointCfg.bufferSize) + "/" + std::to_string(endpointCfg.sampleRate)).c_str(),
+            latency.c_str(),
             nullptr);
 
         if (!props) {
@@ -285,6 +350,10 @@ namespace mka::audio {
         return {};
     }
 
+    void PipeWire::waitProcessQuiescent() noexcept {
+        while (inProcess_.load(std::memory_order_seq_cst)) std::this_thread::yield();
+    }
+
     Result PipeWire::start_() {
         ready_.store(false, std::memory_order_relaxed);
         failed_.store(false, std::memory_order_relaxed);
@@ -296,33 +365,75 @@ namespace mka::audio {
             return std::unexpected{ErrorType::ConfigurationFailed};
         }
 
+        // callback/userData sont figés tant que le backend est Open/Running.
+        processEnabled_.store(true, std::memory_order_seq_cst);
+
         if (pw_stream_set_active(stream_, true) < 0) {
+            processEnabled_.store(false, std::memory_order_seq_cst);
+            pw_stream_set_active(stream_, false);
             pw_thread_loop_unlock(loop_);
+            waitProcessQuiescent();
             pw_thread_loop_stop(loop_);
             return std::unexpected{ErrorType::ConfigurationFailed};
         }
 
-        while (!ready_.load(std::memory_order_acquire) &&
-               !failed_.load(std::memory_order_acquire)) {
-            pw_thread_loop_wait(loop_);
+        // Attente bornée. On lit aussi l'état réel du stream : après un redémarrage,
+        // un stream déjà STREAMING/ERROR n'émet plus de state_changed.
+        const auto deadline = std::chrono::steady_clock::now() + kStartTimeout;
+        bool isReady = false;
+        bool hasFailed = false;
+
+        while (true) {
+            const pw_stream_state st = pw_stream_get_state(stream_, nullptr);
+            if (st == PW_STREAM_STATE_STREAMING || ready_.load(std::memory_order_acquire)) {
+                isReady = true;
+                break;
+            }
+            if (st == PW_STREAM_STATE_ERROR || st == PW_STREAM_STATE_UNCONNECTED ||
+                failed_.load(std::memory_order_acquire)) {
+                hasFailed = true;
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            pw_thread_loop_timed_wait(loop_, 1);
         }
 
+        if (isReady) {
+            active_.store(true, std::memory_order_release);
+            pw_thread_loop_unlock(loop_);
+            return {};
+        }
+
+        // Échec ou délai dépassé : retour arrière complet.
+        processEnabled_.store(false, std::memory_order_seq_cst);
+        pw_stream_set_active(stream_, false);
         pw_thread_loop_unlock(loop_);
+        waitProcessQuiescent();
+        pw_thread_loop_stop(loop_);
 
-        if (failed_.load(std::memory_order_acquire)) {
-            return std::unexpected{ErrorType::ConfigurationFailed};
-        }
-
-        return {};
+        return std::unexpected{hasFailed ? ErrorType::ConfigurationFailed : ErrorType::EndpointUnavailable};
     }
 
     Result PipeWire::stop_() {
+        // D'abord interdire le callback (voir poignée de main dans la classe).
+        processEnabled_.store(false, std::memory_order_seq_cst);
         active_.store(false, std::memory_order_release);
         if (stream_) {
             pw_thread_loop_lock(loop_);
             pw_stream_set_active(stream_, false);
+            // Attente bornée de la sortie de STREAMING : sinon, au start_() suivant,
+            // l'état périmé ferait passer le démarrage pour immédiat.
+            const auto deadline = std::chrono::steady_clock::now() + kStopTimeout;
+            while (pw_stream_get_state(stream_, nullptr) == PW_STREAM_STATE_STREAMING &&
+                   std::chrono::steady_clock::now() < deadline) {
+                pw_thread_loop_timed_wait(loop_, 1);
+            }
             pw_thread_loop_unlock(loop_);
         }
+        // Attend la fin d'un éventuel onProcess en cours avant d'arrêter la boucle.
+        waitProcessQuiescent();
         if (loop_) {
             // Demande l'arrêt de la boucle/thread audio.
             pw_thread_loop_stop(loop_);
@@ -336,8 +447,13 @@ namespace mka::audio {
     }
 
     void PipeWire::teardownStream() noexcept {
+        // Le destructeur peut s'exécuter alors que le backend est Running.
+        processEnabled_.store(false, std::memory_order_seq_cst);
         active_.store(false, std::memory_order_release);
+        // Sans danger si la boucle est déjà arrêtée.
+        if (loop_) pw_thread_loop_stop(loop_);
         if (stream_) {
+            // Boucle arrêtée : plus de thread audio, pas besoin de verrou.
             pw_stream_destroy(stream_);
             stream_ = nullptr;
         }
@@ -382,7 +498,7 @@ namespace mka::audio {
                 .minChannels = 1,
                 .maxChannels = 2,
                 .sampleRates = {supportedSampleRates.begin(), supportedSampleRates.end()},
-                .formats = {supportedFormats.begin(), supportedFormats.end()},
+                .formats = {Format::Float32},
                 .bufferSizes = {supportedBufferSizes.begin(), supportedBufferSizes.end()},
             };
 

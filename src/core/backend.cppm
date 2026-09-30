@@ -12,6 +12,7 @@ module;
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <mutex>
@@ -289,7 +290,10 @@ export namespace mka::audio {
 
                     if (!failedSent && failed_.load(std::memory_order_acquire)) {
                         failedSent = true;
-                        eventHandler_(eventUser_, Event{EventType::Failed, xruns});
+                        // Recharge après l'acquire : synchronisé avec le release de
+                        // notifyFailed, le total inclut les xruns précédant l'échec.
+                        const std::uint64_t finalXruns = xruns_.load(std::memory_order_relaxed);
+                        eventHandler_(eventUser_, Event{EventType::Failed, finalXruns});
                     }
 
                     // Se réveille au bout de kDispatchPeriod ou dès que stop est demandé.
@@ -298,11 +302,19 @@ export namespace mka::audio {
                 }
             }
 
-            std::atomic<std::uint64_t> xruns_{0};
+            // Taille de ligne de cache fixée à 64 octets (pas de
+            // std::hardware_destructive_interference_size : GCC avertit de son
+            // instabilité d'ABI).
+            static constexpr std::size_t kCacheLine = 64;
+
+            // Atomiques écrits par les threads audio/notification : isolés sur leur
+            // propre ligne de cache pour éviter le faux partage avec callback/userData
+            // (lus à chaque cycle audio), state et controlMutex_.
+            alignas(kCacheLine) std::atomic<std::uint64_t> xruns_{0};
             std::atomic<bool> failed_{false};
             std::atomic<std::uint8_t> realtime_{static_cast<std::uint8_t>(RealtimeState::Unknown)};
 
-            EventHandler eventHandler_ = nullptr;
+            alignas(kCacheLine) EventHandler eventHandler_ = nullptr;
             void* eventUser_ = nullptr;
 
             // En dernier : détruit en premier, donc avant les atomiques qu'il lit.
