@@ -101,3 +101,23 @@ TEST_F(PulseAudioRtContractTest, NoHeapAllocationOnAudioThread) {
 
     EXPECT_EQ(allocations, 0u) << "allocation(s) C++ détectée(s) sur un thread audio";
 }
+
+namespace {
+    void countCallback(void* user, const mka::audio::AudioProcessContext& ctx) noexcept {
+        rt_test::countAudioCall(*static_cast<rt_test::StopContractState*>(user), ctx);
+    }
+}
+
+// Aucun callback après le retour de stop(), sur des start/stop répétés avec
+// des lectures concurrentes de status(). Pas de test malloc ici : libpulse
+// alloue par conception dans pa_stream_begin_write (backend "best effort").
+TEST_F(PulseAudioRtContractTest, NoCallbackAfterStopUnderStress) {
+    rt_test::StopContractState state;
+    mka::audio::PulseAudio pa;
+    ASSERT_TRUE(pa.setProcessFunction(countCallback, &state));
+    ASSERT_TRUE(pa.open(makeConfig()));
+
+    const char* failure = rt_test::stopStress(pa, state);
+    ASSERT_TRUE(pa.close());
+    EXPECT_STREQ(failure, "");
+}

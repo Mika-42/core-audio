@@ -165,3 +165,68 @@ TEST_F(PipeWireRtContractTest, NoHeapAllocationOnAudioThreadInput) {
 
     EXPECT_EQ(allocations, 0u) << "allocation(s) C++ détectée(s) sur un thread audio";
 }
+
+namespace {
+    void countCallback(void* user, const mka::audio::AudioProcessContext& ctx) noexcept {
+        rt_test::countAudioCall(*static_cast<rt_test::StopContractState*>(user), ctx);
+    }
+}
+
+// Aucun callback après le retour de stop() (onProcess tourne sur le data-loop
+// RT, que pw_thread_loop_stop n'arrête pas), sur des start/stop répétés.
+TEST_F(PipeWireRtContractTest, NoCallbackAfterStopUnderStress) {
+    if (!output.available) GTEST_SKIP() << "aucun endpoint de sortie PipeWire";
+
+    rt_test::StopContractState state;
+    mka::audio::PipeWire pw;
+    ASSERT_TRUE(pw.setProcessFunction(countCallback, &state));
+    ASSERT_TRUE(pw.open(makeOutputConfig()));
+
+    const char* failure = rt_test::stopStress(pw, state);
+    ASSERT_TRUE(pw.close());
+    EXPECT_STREQ(failure, "");
+}
+
+// Aucun malloc/free (y compris dans libpipewire) sur le thread audio en régime établi.
+TEST_F(PipeWireRtContractTest, NoLibcAllocationOnAudioThread) {
+    if (!output.available) GTEST_SKIP() << "aucun endpoint de sortie PipeWire";
+
+    rt_test::StopContractState state;
+    mka::audio::PipeWire pw;
+    ASSERT_TRUE(pw.setProcessFunction(countCallback, &state));
+    ASSERT_TRUE(pw.open(makeOutputConfig()));
+    ASSERT_TRUE(pw.start());
+
+    const bool warm = rt_test::waitFor([&] { return state.calls.load() >= 8; });
+    alloc_probe::armAudio();
+    const int from = state.calls.load();
+    const bool enough = warm
+        && rt_test::waitFor([&] { return state.calls.load() >= from + rt_test::kMinCycles; });
+    const std::size_t allocations = alloc_probe::disarmAudio();
+
+    ASSERT_TRUE(pw.stop());
+    ASSERT_TRUE(pw.close());
+    ASSERT_TRUE(enough) << "pas assez de cycles observés : " << state.calls.load();
+    EXPECT_EQ(allocations, 0u) << "malloc/free détecté(s) sur le thread audio";
+}
+
+// Destruction d'un backend Running sans stop() : le stream doit être détruit
+// boucle arrêtée, et plus aucun callback ne doit suivre.
+TEST_F(PipeWireRtContractTest, DestroyWhileRunningIsSafe) {
+    if (!output.available) GTEST_SKIP() << "aucun endpoint de sortie PipeWire";
+
+    rt_test::StopContractState state;
+    for (int round = 0; round < 5; ++round) {
+        {
+            mka::audio::PipeWire pw;
+            ASSERT_TRUE(pw.setProcessFunction(countCallback, &state));
+            ASSERT_TRUE(pw.open(makeOutputConfig()));
+            ASSERT_TRUE(pw.start());
+            const int before = state.calls.load();
+            ASSERT_TRUE(rt_test::waitFor([&] { return state.calls.load() >= before + 4; }));
+        }   // ~PipeWire() en Running
+        const int atDestroy = state.calls.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        EXPECT_EQ(state.calls.load(), atDestroy) << "callback appelé après destruction";
+    }
+}

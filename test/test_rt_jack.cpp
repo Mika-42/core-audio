@@ -179,3 +179,44 @@ TEST_F(JackRtContractTest, NoCallbackProducesSilence) {
 
     EXPECT_EQ(probe.peak.load(), 0.0f) << "signal non nul émis sans callback";
 }
+
+namespace {
+    void countCallback(void* user, const mka::audio::AudioProcessContext& ctx) noexcept {
+        rt_test::countAudioCall(*static_cast<rt_test::StopContractState*>(user), ctx);
+    }
+}
+
+// Aucun callback après le retour de stop(), sur des start/stop répétés avec
+// des lectures concurrentes de status().
+TEST_F(JackRtContractTest, NoCallbackAfterStopUnderStress) {
+    rt_test::StopContractState state;
+    mka::audio::JACK jack;
+    ASSERT_TRUE(jack.setProcessFunction(countCallback, &state));
+    ASSERT_TRUE(jack.open(makeConfig(server)));
+
+    const char* failure = rt_test::stopStress(jack, state);
+    ASSERT_TRUE(jack.close());
+    EXPECT_STREQ(failure, "");
+}
+
+// Aucun malloc/free (y compris dans libjack) sur le thread audio en régime établi.
+TEST_F(JackRtContractTest, NoLibcAllocationOnAudioThread) {
+    rt_test::StopContractState state;
+    mka::audio::JACK jack;
+    ASSERT_TRUE(jack.setProcessFunction(countCallback, &state));
+    ASSERT_TRUE(jack.open(makeConfig(server)));
+    ASSERT_TRUE(jack.start());
+
+    // Chauffe : les premiers cycles ne sont pas mesurés.
+    const bool warm = rt_test::waitFor([&] { return state.calls.load() >= 8; });
+    alloc_probe::armAudio();
+    const int from = state.calls.load();
+    const bool enough = warm
+        && rt_test::waitFor([&] { return state.calls.load() >= from + rt_test::kMinCycles; });
+    const std::size_t allocations = alloc_probe::disarmAudio();
+
+    ASSERT_TRUE(jack.stop());
+    ASSERT_TRUE(jack.close());
+    ASSERT_TRUE(enough) << "pas assez de cycles observés : " << state.calls.load();
+    EXPECT_EQ(allocations, 0u) << "malloc/free détecté(s) sur le thread audio";
+}
