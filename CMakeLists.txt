@@ -43,6 +43,16 @@ set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(FetchContent)
+
+FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.17.0
+)
+
+FetchContent_MakeAvailable(googletest)
+
 # ============================================================
 # Core library
 # ============================================================
@@ -212,8 +222,6 @@ if (MKA_BUILD_TESTS)
 
     enable_testing()
 
-    find_package(GTest REQUIRED)
-
     # --------------------------------------------------------
     # Core tests
     # --------------------------------------------------------
@@ -232,22 +240,22 @@ if (MKA_BUILD_TESTS)
     )
 
     if (MKA_BUILD_ALSA)
-        target_sources(mka-core-audio-tests PRIVATE test/test_alsa.cpp test/test_rt_alsa.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/alsa/test_alsa.cpp test/linux/alsa/test_rt_alsa.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-alsa)
     endif ()
 
     if (MKA_BUILD_PIPEWIRE)
-        target_sources(mka-core-audio-tests PRIVATE test/test_pipewire.cpp test/test_rt_pipewire.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/pipewire/test_pipewire.cpp test/linux/pipewire/test_rt_pipewire.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-pipewire)
     endif ()
 
     if (MKA_BUILD_JACK)
-        target_sources(mka-core-audio-tests PRIVATE test/test_jack.cpp test/test_rt_jack.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/jack/test_jack.cpp test/linux/jack/test_rt_jack.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-jack)
     endif ()
 
     if (MKA_BUILD_PULSEAUDIO)
-        target_sources(mka-core-audio-tests PRIVATE test/test_pulseaudio.cpp test/test_rt_pulseaudio.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/pulseaudio/test_pulseaudio.cpp test/linux/pulseaudio/test_rt_pulseaudio.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-pulseaudio)
     endif ()
 
@@ -270,8 +278,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_ALSA)
 
         add_executable(mka-audio-alsa-tests
-                test/test_alsa.cpp
-                test/test_rt_alsa.cpp
+                test/linux/alsa/test_alsa.cpp
+                test/linux/alsa/test_rt_alsa.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -301,8 +309,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_PIPEWIRE)
 
         add_executable(mka-audio-pipewire-tests
-                test/test_pipewire.cpp
-                test/test_rt_pipewire.cpp
+                test/linux/pipewire/test_pipewire.cpp
+                test/linux/pipewire/test_rt_pipewire.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -332,8 +340,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_JACK)
 
         add_executable(mka-audio-jack-tests
-                test/test_jack.cpp
-                test/test_rt_jack.cpp
+                test/linux/jack/test_jack.cpp
+                test/linux/jack/test_rt_jack.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -363,8 +371,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_PULSEAUDIO)
 
         add_executable(mka-audio-pulseaudio-tests
-                test/test_pulseaudio.cpp
-                test/test_rt_pulseaudio.cpp
+                test/linux/pulseaudio/test_pulseaudio.cpp
+                test/linux/pulseaudio/test_rt_pulseaudio.cpp
                 test/utils/alloc_probe.cpp
         )
 

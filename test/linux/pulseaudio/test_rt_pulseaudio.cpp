@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <string>
 
-#include "utils/rt_test_utils.hpp"
+#include "../../utils/rt_test_utils.hpp"
 
 import mka.audio.backend.pulseaudio;
 import mka.audio.process;

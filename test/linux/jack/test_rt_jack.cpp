@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "utils/rt_test_utils.hpp"
+#include "../../utils/rt_test_utils.hpp"
 
 import mka.audio.backend.jack;
 import mka.audio.process;
