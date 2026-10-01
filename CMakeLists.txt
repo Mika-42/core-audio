@@ -11,30 +11,38 @@ project(mka-core-audio VERSION 0.1.0
 
 option(MKA_BUILD_TESTS
         "Build unit and integration tests"
-        ON
+        ${LINUX}
 )
 
 option(MKA_BUILD_ALSA
         "Build the ALSA backend"
-        ON
+        ${LINUX}
 )
 
 option(MKA_BUILD_PIPEWIRE
         "Build the PipeWire backend"
-        ON
+        ${LINUX}
 )
 
 option(MKA_BUILD_JACK
         "Build the JACK backend"
-        ON
+        ${LINUX}
 )
 
 option(MKA_BUILD_PULSEAUDIO
         "Build the PulseAudio backend"
-        ON
+        ${LINUX}
 )
 
+option(MKA_BUILD_ASIO
+        "Build the ASIO backend (Windows only, requires the Steinberg ASIO SDK)"
+        ${WIN32}
+)
 
+set(MKA_ASIO_SDK_DIR
+        "${CMAKE_SOURCE_DIR}/thirdparty/ASIOSDK"
+        CACHE PATH "Path to the ASIO SDK"
+)
 # ============================================================
 # Global C++ configuration
 # ============================================================
@@ -232,23 +240,28 @@ if (MKA_BUILD_TESTS)
     )
 
     if (MKA_BUILD_ALSA)
-        target_sources(mka-core-audio-tests PRIVATE test/test_alsa.cpp test/test_rt_alsa.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/alsa/test_alsa.cpp test/linux/alsa/test_rt_alsa.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-alsa)
     endif ()
 
     if (MKA_BUILD_PIPEWIRE)
-        target_sources(mka-core-audio-tests PRIVATE test/test_pipewire.cpp test/test_rt_pipewire.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/pipewire/test_pipewire.cpp test/linux/pipewire/test_rt_pipewire.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-pipewire)
     endif ()
 
     if (MKA_BUILD_JACK)
-        target_sources(mka-core-audio-tests PRIVATE test/test_jack.cpp test/test_rt_jack.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/jack/test_jack.cpp test/linux/jack/test_rt_jack.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-jack)
     endif ()
 
     if (MKA_BUILD_PULSEAUDIO)
-        target_sources(mka-core-audio-tests PRIVATE test/test_pulseaudio.cpp test/test_rt_pulseaudio.cpp test/utils/alloc_probe.cpp)
+        target_sources(mka-core-audio-tests PRIVATE test/linux/pulseaudio/test_pulseaudio.cpp test/linux/pulseaudio/test_rt_pulseaudio.cpp test/utils/alloc_probe.cpp)
         target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-pulseaudio)
+    endif ()
+
+    if (MKA_BUILD_ASIO)
+        target_sources(mka-core-audio-tests PRIVATE test/windows/asio_test.cpp)
+        target_link_libraries(mka-core-audio-tests PRIVATE mka-audio-asio)
     endif ()
 
     target_compile_features(
@@ -270,8 +283,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_ALSA)
 
         add_executable(mka-audio-alsa-tests
-                test/test_alsa.cpp
-                test/test_rt_alsa.cpp
+                test/linux/alsa/test_alsa.cpp
+                test/linux/alsa/test_rt_alsa.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -301,8 +314,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_PIPEWIRE)
 
         add_executable(mka-audio-pipewire-tests
-                test/test_pipewire.cpp
-                test/test_rt_pipewire.cpp
+                test/linux/pipewire/test_pipewire.cpp
+                test/linux/pipewire/test_rt_pipewire.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -332,8 +345,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_JACK)
 
         add_executable(mka-audio-jack-tests
-                test/test_jack.cpp
-                test/test_rt_jack.cpp
+                test/linux/jack/test_jack.cpp
+                test/linux/jack/test_rt_jack.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -363,8 +376,8 @@ if (MKA_BUILD_TESTS)
     if (MKA_BUILD_PULSEAUDIO)
 
         add_executable(mka-audio-pulseaudio-tests
-                test/test_pulseaudio.cpp
-                test/test_rt_pulseaudio.cpp
+                test/linux/pulseaudio/test_pulseaudio.cpp
+                test/linux/pulseaudio/test_rt_pulseaudio.cpp
                 test/utils/alloc_probe.cpp
         )
 
@@ -383,6 +396,87 @@ if (MKA_BUILD_TESTS)
         gtest_discover_tests(
                 mka-audio-pulseaudio-tests
                 TEST_PREFIX "pulseaudio."
+        )
+
+    endif ()
+
+    # ============================================================
+    # ASIO backend
+    # ============================================================
+
+    if (MKA_BUILD_ASIO)
+
+        if (NOT WIN32)
+            message(FATAL_ERROR "MKA_BUILD_ASIO is only supported on Windows")
+        endif ()
+
+        if (NOT MKA_ASIO_SDK_DIR OR NOT EXISTS "${MKA_ASIO_SDK_DIR}/common/asio.h")
+            message(FATAL_ERROR
+                    "ASIO SDK not found. Set -DMKA_ASIO_SDK_DIR=<path to the ASIO SDK> "
+                    "(the directory containing common/, host/ and host/pc/).")
+        endif ()
+
+        add_library(mka-audio-asio)
+
+        target_sources(mka-audio-asio
+                PUBLIC
+                FILE_SET CXX_MODULES
+                BASE_DIRS
+                src
+                FILES
+                src/backend/windows/asio.cppm
+                PRIVATE
+                ${MKA_ASIO_SDK_DIR}/common/asio.cpp
+                ${MKA_ASIO_SDK_DIR}/host/asiodrivers.cpp
+                ${MKA_ASIO_SDK_DIR}/host/pc/asiolist.cpp
+        )
+
+        target_include_directories(mka-audio-asio
+                PRIVATE
+                ${MKA_ASIO_SDK_DIR}/common
+                ${MKA_ASIO_SDK_DIR}/host
+                ${MKA_ASIO_SDK_DIR}/host/pc
+        )
+
+        target_link_libraries(mka-audio-asio
+                PRIVATE
+                mka-core-audio
+                ole32
+                advapi32
+        )
+
+        target_compile_features(
+                mka-audio-asio
+                PRIVATE
+                cxx_std_26
+        )
+
+    endif ()
+    # --------------------------------------------------------
+    # ASIO tests
+    # --------------------------------------------------------
+
+    if (MKA_BUILD_ASIO)
+
+        add_executable(mka-audio-asio-tests
+                test/windows/asio_test.cpp
+        )
+
+        target_link_libraries(mka-audio-asio-tests
+                PRIVATE
+                mka-audio-asio
+                GTest::gtest_main
+        )
+
+        target_compile_features(
+                mka-audio-asio-tests
+                PRIVATE
+                cxx_std_26
+        )
+
+        gtest_discover_tests(
+                mka-audio-asio-tests
+                TEST_PREFIX "asio."
         )
 
     endif ()

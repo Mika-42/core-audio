@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <string>
 
-#include "utils/rt_test_utils.hpp"
+#include "../../utils/rt_test_utils.hpp"
 
 import mka.audio.backend.alsa;
 import mka.audio.process;
