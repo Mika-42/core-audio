@@ -71,6 +71,7 @@ target_sources(mka-core-audio
         src/core/constants.cppm
         src/core/error.cppm
         src/core/convert.cppm
+        src/core/plateform.cppm
 )
 
 target_compile_features(
